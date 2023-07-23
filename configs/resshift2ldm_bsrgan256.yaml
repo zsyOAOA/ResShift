@@ -1,0 +1,103 @@
+model:
+  target: models.unet.UNetModelConv
+  ckpt_path: ~
+  params:
+    in_channels: 6
+    model_channels: 160
+    out_channels: 3
+    cond_lq: True
+    channel_mult: [1, 2, 2, 4]
+    num_res_blocks: [2, 2, 2, 2]
+    conv_resample: True
+    dims: 2
+    use_scale_shift_norm: True
+    resblock_updown: False
+    use_fp16: False
+    
+diffusion:
+  target: models.script_util.create_gaussian_diffusion
+  params:
+    sf: 4
+    schedule_name: ldm
+    schedule_kwargs:
+      mat_path: weights/schedule/ldm_schedule.mat
+    etas_end: 0.99
+    steps: 1000
+    min_noise_level: 0.04
+    kappa: 40.0
+    weighted_mse: False
+    predict_type: epsilon
+    timestep_respacing: ""
+    scale_factor: 1.0
+    normalize_input: True
+    latent_flag: True
+
+autoencoder:
+  target: ldm.models.autoencoder.VQModelTorch
+  ckpt_path: weights/autoencoder/autoencoder_vq_f4.pth
+  use_fp16: True
+  params:
+    embed_dim: 3
+    n_embed: 8192
+    ddconfig:
+      double_z: False
+      z_channels: 3
+      resolution: 256
+      in_channels: 3
+      out_ch: 3
+      ch: 128
+      ch_mult:
+      - 1
+      - 2
+      - 4
+      num_res_blocks: 2
+      attn_resolutions: []
+      dropout: 0.0
+      padding_mode: zeros
+
+data:
+  train:
+    type: bsrganimagenet
+    params:
+      #dir_paths: ['/mnt/lustre/share/zhangwenwei/data/imagenet/train',]
+      dir_paths: ['/home/users/ntu/cheeguan/scratch/share/imagenet/train',]
+      im_exts: ['JPEG', ]
+      sf: 4
+      gt_size: 256
+      length: ~
+      need_path: False
+      mean: 0.5
+      std: 0.5
+      recursive: True
+      degradation: bsrgan_light
+  val:
+    type: folder
+    params:
+      #dir_path: /mnt/lustre/share/zsyue/ResShift/SR/testingdata/DIV2K/lq
+      #dir_path_extra: /mnt/lustre/share/zsyue/ResShift/SR/testingdata/DIV2K/gt
+      dir_path: /home/users/ntu/cheeguan/scratch/zsyue/data/DIV2K/lq
+      dir_path_extra: /home/users/ntu/cheeguan/scratch/zsyue/data/DIV2K/gt
+      transform_type: default
+      transform_kwargs:
+          mean: 0.5
+          std: 0.5
+      im_exts: png
+      length: 8
+      recursive: False
+
+train:
+  lr: 5e-5
+  batch: [64, 8]   # batchsize for training and validation
+  use_fp16: False
+  microbatch: 16
+  seed: 12345
+  global_seeding: False
+  ema_rate: 0.999
+  iterations: 300000
+  milestones: [5000, 300000]
+  weight_decay: 0
+  save_freq: 10000
+  val_freq: 10000
+  log_freq: [1000, 2000, 1] #[training loss, training images, val images]
+  save_images: True  # save the images of tensorboard logging
+  use_ema_val: True

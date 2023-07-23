@@ -1,0 +1,92 @@
+model:
+  target: models.unet.UNetModel
+  params:
+    image_size: 512
+    in_channels: 6
+    model_channels: 32
+    out_channels: 3
+    cond_lq: True
+    attention_resolutions: [16, 8]
+    dropout: 0
+    channel_mult: [1, 2, 4, 8, 8, 16, 16]
+    num_res_blocks: [1, 2, 2, 3, 3, 4, 4]
+    conv_resample: True
+    dims: 2
+    use_fp16: False
+    num_head_channels: 32
+    use_scale_shift_norm: True
+    resblock_updown: False
+    use_new_attention_order: False
+
+diffusion:
+  target: models.script_util.create_gaussian_diffusion
+  params:
+    min_noise_level: 0.01
+    ponential: 1.0
+    steps: 50
+    kappa: 0.5
+    learn_sigma: False
+    noise_schedule: linear
+    weighted_mse: False
+    predict_xstart: True
+    timestep_respacing: ""
+
+autoencoder: ~
+
+train:
+  lr: 1e-4
+  batch: [24, 16]   # batchsize for training and validation
+  microbatch: 8
+  use_fp16: False
+  iterations: 500000
+  weight_decay: 0
+  scheduler: step   # step or cosin
+  milestones: [5000, 500000]
+  ema_rate: 0.999
+  save_freq: 5000
+  val_freq: 5000
+  log_freq: [100, 2000, 1] #[training loss, training images, val images]
+  save_images: True  # save the images of tensorboard logging
+
+data:
+  train:
+    type: gfpgan 
+    params:
+      dir_path: /mnt/lustre/zsyue/disk/data/FFHQ/images512x512
+      im_exts: png
+      io_backend:
+        type: disk
+   
+      use_hflip: true
+      mean: [0.0, 0.0, 0.0]
+      std: [1.0, 1.0, 1.0]
+      out_size: 512
+   
+      blur_kernel_size: 41
+      kernel_list: ['iso', 'aniso']
+      kernel_prob: [0.5, 0.5]
+      blur_sigma: [0.1, 15]
+      downsample_range: [0.8, 32]
+      noise_range: [0, 20]
+      jpeg_range: [30, 100]
+   
+      color_jitter_prob: ~
+      color_jitter_pt_prob: ~
+      gray_prob: 0.01
+      gt_gray: True
+
+      need_gt_path: False
+  val:
+    type: folder 
+    params:
+      dir_path: /mnt/lustre/zsyue/disk/IRDiff/Face/testing_data/syn_journal_celeba512/lq
+      im_exts: png
+      transform_type: default
+      transform_kwargs:
+        mean: 0.5
+        std: 0.5
+      dir_path_extra: /mnt/lustre/zsyue/disk/IRDiff/Face/testing_data/syn_journal_celeba512/hq
+      need_path: False
+      length: 32
+      recursive: False
+
