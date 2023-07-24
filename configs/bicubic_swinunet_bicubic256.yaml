@@ -28,7 +28,7 @@ diffusion:
     sf: 4
     schedule_name: exponential
     schedule_kwargs:
-      power: 0.5
+      power: 0.3
     etas_end: 0.99
     steps: 20
     min_noise_level: 0.04
@@ -65,48 +65,57 @@ autoencoder:
 
 data:
   train:
-    type: bsrganimagenet
+    type: bicubic
     params:
-      dir_paths: ~
+      sf: 4
+      dir_path: ~
       txt_file_path: [
                       '/mnt/lustre/zsyue/disk/data/ImageNet/train/image_path_all.txt', 
                       '/mnt/lustre/zsyue/disk/data/FFHQ/files_txt/ffhq256.txt',
                      ] 
-      sf: 4
-      gt_size: 256
+      mean: 0.5
+      std: 0.5
+      hflip: True
+      rotation: False
+      resize_back: False
       length: ~
       need_path: False
       im_exts: ['png', 'jpg', 'jpeg', 'JPEG', 'bmp']
+      recursive: False
+      use_sharp: False
+      rescale_gt: True
+      gt_size: 256
+  val:
+    type: bicubic
+    params:
+      sf: 4
+      dir_path: testdata/Bicubicx4/gt
+      txt_file_path: ~
       mean: 0.5
       std: 0.5
-      recursive: True
-      degradation: bsrgan_light
-      use_sharp: True
-  val:
-    type: folder
-    params:
-      dir_path: testdata/RealSet128/
-      dir_path_extra: ~
-      transform_type: default
-      transform_kwargs:
-          mean: 0.5
-          std: 0.5
-      im_exts: png
-      length: ~
+      hflip: False
+      rotation: False
+      resize_back: False
+      length: 32
+      need_path: False
+      im_exts: ['png', 'jpg', 'jpeg', 'JPEG', 'bmp']
       recursive: False
+      use_sharp: False
+      rescale_gt: False
+      gt_size: 256
 
 train:
   lr: 5e-5
   batch: [64, 8]   # batchsize for training and validation
   use_fp16: False
-  microbatch: 8
+  microbatch: 16
   seed: 123456
   global_seeding: False
   prefetch_factor: 4
   num_workers: 8
   ema_rate: 0.999
   iterations: 500000
-  milestones: [5000, 2000000]
+  milestones: [5000, 500000]
   weight_decay: 0
   save_freq: 10000
   val_freq: 10000

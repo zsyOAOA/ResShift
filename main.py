@@ -6,8 +6,6 @@ import argparse
 from omegaconf import OmegaConf
 from trainer import TrainerDifIR as Trainer
 
-from utils.util_opts import str2bool
-
 def get_parser(**parser_kwargs):
     parser = argparse.ArgumentParser(**parser_kwargs)
     parser.add_argument(
@@ -33,7 +31,7 @@ def get_parser(**parser_kwargs):
     parser.add_argument(
             "--steps",
             type=int,
-            default=10,
+            default=15,
             help="Hyper-parameters of diffusion steps",
             )
     args = parser.parse_args()

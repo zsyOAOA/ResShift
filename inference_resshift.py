@@ -20,21 +20,30 @@ def get_parser(**parser_kwargs):
     parser.add_argument("--scale", type=int, default=4, help="Scale factor for SR.")
     parser.add_argument("--chop_size", type=int, default=512, help="Chopping forward.")
     parser.add_argument("--seed", type=int, default=12345, help="Random seed.")
+    parser.add_argument(
+            "--task",
+            type=str,
+            default="realsrx4",
+            choices=['realsrx4', 'bicsrx4'],
+            help="Chopping forward.",
+            )
     args = parser.parse_args()
 
     return args
 
 def get_configs(args):
-    configs = OmegaConf.load('./configs/realsr_swinunet_realesrgan256.yaml')
+
+    if args.task == 'realsrx4':
+        configs = OmegaConf.load('./configs/realsr_swinunet_realesrgan256.yaml')
 
     # prepare the checkpoint
     ckpt_dir = Path('./weights')
     if not ckpt_dir.exists():
         ckpt_dir.mkdir()
-    ckpt_path = ckpt_dir / f'resshift_sr_s{args.steps}_k2_p03.pth'
+    ckpt_path = ckpt_dir / f'resshift_{args.task}_s{args.steps}.pth'
     if not ckpt_path.exists():
          load_file_from_url(
-            url="https://github.com/zsyOAOA/ResShift/releases/download/v1.0/resshift_sr_s15_k2_p03.pth",
+            url=f"https://github.com/zsyOAOA/ResShift/releases/download/v1.0/{ckpt_path.name}",
             model_dir=ckpt_dir,
             progress=True,
             file_name=ckpt_path.name,
