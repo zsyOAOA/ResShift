@@ -28,11 +28,11 @@ conda activate ResShift
 
 ## Applications
 ### :point_right: Real-world image super-resolution
-[<img src="assets/0015.png" height="368px" width="496px"/>](https://imgsli.com/MTkzNzgz) [<img src="assets/0030.png" height="368px" width="368px"/>](https://imgsli.com/MTkzNzgx)
+[<img src="assets/0015.png" height="283px"/>](https://imgsli.com/MTkzNzgz) [<img src="assets/0030.png" height="283px"/>](https://imgsli.com/MTkzNzgx)
 
-[<img src="assets/frog.png" height="368px" width="368px"/>](https://imgsli.com/MTkzNzg0) [<img src="assets/dog2.png" height="368px" width="496"/>](https://imgsli.com/MTkzNzg3)
+[<img src="assets/frog.png" height="283px"/>](https://imgsli.com/MTkzNzg0) [<img src="assets/dog2.png" height="283px">](https://imgsli.com/MTkzNzg3)
 
-[<img src="assets/cat.png" height="288px" width="288"/>](https://imgsli.com/MTkzNzkx) [<img src="assets/Lincon.png" height="288px" width="288"/>](https://imgsli.com/MTkzNzk5) [<img src="assets/oldphoto6.png" height="288px" width="288"/>](https://imgsli.com/MTkzNzk2) 
+[<img src="assets/cat.png" height="220px"/>](https://imgsli.com/MTkzNzkx) [<img src="assets/Lincon.png" height="220px"/>](https://imgsli.com/MTkzNzk5) [<img src="assets/oldphoto6.png" height="220px"/>](https://imgsli.com/MTkzNzk2) 
 
 
 ## Inference
