@@ -30,9 +30,9 @@ diffusion:
     schedule_kwargs:
       power: 0.3
     etas_end: 0.99
-    steps: 20
+    steps: 15
     min_noise_level: 0.04
-    kappa: 2.0
+    kappa: 1.0
     weighted_mse: False
     predict_type: xstart
     timestep_respacing: ~
