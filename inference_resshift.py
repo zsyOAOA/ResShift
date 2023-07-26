@@ -53,7 +53,7 @@ def get_configs(args):
     if not vqgan_path.exists():
          load_file_from_url(
             url="https://github.com/zsyOAOA/ResShift/releases/download/v1.0/autoencoder_vq_f4.pth",
-            model_dir=vqgan_dir,
+            model_dir=ckpt_dir,
             progress=True,
             file_name=vqgan_path.name,
             )
