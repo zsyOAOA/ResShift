@@ -126,8 +126,8 @@ class ResShiftSampler(BaseSampler):
         ori_h, ori_w = y0.shape[2:]
         if not (ori_h % desired_min_size == 0 and ori_w % desired_min_size == 0):
             flag_pad = True
-            pad_h = ((ori_h // desired_min_size) + 1) * desired_min_size - ori_h
-            pad_w = ((ori_w // desired_min_size) + 1) * desired_min_size - ori_w
+            pad_h = (math.ceil(ori_h / desired_min_size)) * desired_min_size - ori_h
+            pad_w = (math.ceil(ori_w / desired_min_size)) * desired_min_size - ori_w
             y0 = F.pad(y0, pad=(0, pad_w, 0, pad_h), mode='reflect')
         else:
             flag_pad = False

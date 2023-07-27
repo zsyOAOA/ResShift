@@ -18,8 +18,14 @@ def get_parser(**parser_kwargs):
     parser.add_argument("-o", "--out_path", type=str, default="./results", help="Output path.")
     parser.add_argument("-s", "--steps", type=int, default=15, help="Diffusion length.")
     parser.add_argument("--scale", type=int, default=4, help="Scale factor for SR.")
-    parser.add_argument("--chop_size", type=int, default=512, help="Chopping forward.")
     parser.add_argument("--seed", type=int, default=12345, help="Random seed.")
+    parser.add_argument(
+            "--chop_size",
+            type=int,
+            default=512,
+            choices=[512, 256],
+            help="Chopping forward.",
+            )
     parser.add_argument(
             "--task",
             type=str,
@@ -63,34 +69,29 @@ def get_configs(args):
     configs.diffusion.params.sf = args.scale
     configs.autoencoder.ckpt_path = str(vqgan_path)
 
-    if args.chop_size == 512:
-        chop_stride = 448
-        chop_bs = 1
-    elif args.chop_size == 256:
-        chop_stride = 224
-        chop_bs = 4
-    elif args.chop_size == 128:
-        chop_stride = 96
-        chop_bs = 16
-    else:
-        raise ValueError("Chop size only accept 128, 256, or 512!")
-
     # save folder
     if not Path(args.out_path).exists():
         Path(args.out_path).mkdir()
 
-    return configs, chop_stride, chop_bs
+    if args.chop_size == 512:
+        chop_stride = 448
+    elif args.chop_size == 256:
+        chop_stride = 224
+    else:
+        raise ValueError("Chop size must be in [512, 384, 256]")
+
+    return configs, chop_stride
 
 def main():
     args = get_parser()
 
-    configs, chop_stride, chop_bs = get_configs(args)
+    configs, chop_stride = get_configs(args)
 
     resshift_sampler = ResShiftSampler(
             configs,
             chop_size=args.chop_size,
             chop_stride=chop_stride,
-            chop_bs=chop_bs,
+            chop_bs=1,
             use_fp16=True,
             seed=args.seed,
             )
