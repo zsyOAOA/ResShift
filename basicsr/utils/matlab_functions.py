@@ -21,7 +21,7 @@ def calculate_weights_indices(in_length, out_length, scale, kernel, kernel_width
         out_length (int): Output length.
         scale (float): Scale factor.
         kernel_width (int): Kernel width.
-        antialisaing (bool): Whether to apply anti-aliasing when downsampling.
+        antialiasing (bool): Whether to apply anti-aliasing when downsampling.
     """
 
     if (scale < 1) and antialiasing:
@@ -95,7 +95,7 @@ def imresize(img, scale, antialiasing=True):
             Numpy: Input image with shape (h, w, c), [0, 1] range.
         scale (float): Scale factor. The same scale applies for both height
             and width.
-        antialisaing (bool): Whether to apply anti-aliasing when downsampling.
+        antialiasing (bool): Whether to apply anti-aliasing when downsampling.
             Default: True.
 
     Returns:
