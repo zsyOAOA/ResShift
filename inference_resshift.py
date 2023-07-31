@@ -71,7 +71,7 @@ def get_configs(args):
 
     # save folder
     if not Path(args.out_path).exists():
-        Path(args.out_path).mkdir()
+        Path(args.out_path).mkdir(parents=True)
 
     if args.chop_size == 512:
         chop_stride = 448
