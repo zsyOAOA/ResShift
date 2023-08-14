@@ -40,8 +40,11 @@ def get_parser(**parser_kwargs):
 def get_configs(args):
     if args.task == 'realsrx4':
         configs = OmegaConf.load('./configs/realsr_swinunet_realesrgan256.yaml')
-    elif args.task in ['bicsrx4_cv2', 'bicsrx4_matlab']:
+    elif args.task == 'bicsrx4_cv2':
         configs = OmegaConf.load('./configs/bicubic_swinunet_bicubic256.yaml')
+    elif args.task == 'bicsrx4_matlab':
+        configs = OmegaConf.load('./configs/bicubic_swinunet_bicubic256.yaml')
+        configs.diffusion.params.kappa = 2.0
 
     # prepare the checkpoint
     ckpt_dir = Path('./weights')
