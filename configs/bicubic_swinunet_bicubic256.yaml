@@ -103,6 +103,7 @@ data:
       use_sharp: False
       rescale_gt: False
       gt_size: 256
+      matlab_mode: True
 
 train:
   lr: 5e-5

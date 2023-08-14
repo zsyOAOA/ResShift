@@ -327,6 +327,10 @@ class BicubicData(Dataset):
             need_path=False,
             im_exts=['png', 'jpg', 'jpeg', 'JPEG', 'bmp'],
             recursive=False,
+            use_sharp=False,
+            rescale_gt=True,
+            gt_size=256,
+            matlab_mode=True,
             ):
         if txt_file_path is None:
             assert dir_path is not None
@@ -349,8 +353,14 @@ class BicubicData(Dataset):
         self.length = length
         self.need_path = need_path
         self.resize_back = resize_back
+        self.use_sharp = use_sharp
+        self.rescale_gt = rescale_gt
+        self.gt_size = gt_size
+        self.matlab_mode = matlab_mode
 
         self.transform = get_transforms('default', {'mean': mean, 'std': std})
+        if rescale_gt:
+            self.smallest_rescaler = SmallestMaxSize(max_size=gt_size)
 
     def __len__(self):
         return len(self.file_paths)
@@ -359,12 +369,29 @@ class BicubicData(Dataset):
         im_path = self.file_paths[index]
         im_gt = util_image.imread(im_path, chn='rgb', dtype='float32')
 
+        h, w = im_gt.shape[:2]
+        if h < self.gt_size or w < self.gt_size:
+            pad_h = max(0, self.gt_size - h)
+            pad_w = max(0, self.gt_size - w)
+            im_gt = cv2.copyMakeBorder(im_gt, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
+
+        if self.rescale_gt:
+            im_gt = self.smallest_rescaler(image=im_gt)['image']
+
+        im_gt = util_image.random_crop(im_gt, self.gt_size)
+
         im_gt = augment(im_gt, hflip=self.hflip, rotation=self.rotation, return_status=False)
 
         # imresize
-        im_lq = cv2.resize(im_gt, dsize=None, fx=1/self.sf, fy=1/self.sf, interpolation=cv2.INTER_CUBIC)
+        if self.matlab_mode:
+            im_lq = util_image.imresize_np(im_gt, scale=1/self.sf)
+        else:
+            im_lq = cv2.resize(im_gt, dsize=None, fx=1/self.sf, fy=1/self.sf, interpolation=cv2.INTER_CUBIC)
         if self.resize_back:
-            im_lq = cv2.resize(im_lq, dsize=None, fx=self.sf, fy=self.sf, interpolation=cv2.INTER_CUBIC)
+            if self.matlab_mode:
+                im_lq = util_image.imresize_np(im_gt, scale=self.sf)
+            else:
+                im_lq = cv2.resize(im_lq, dsize=None, fx=self.sf, fy=self.sf, interpolation=cv2.INTER_CUBIC)
         im_lq = np.clip(im_lq, 0.0, 1.0)
 
         out = {'lq':self.transform(im_lq), 'gt':self.transform(im_gt)}
