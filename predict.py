@@ -14,7 +14,8 @@ class Predictor(BasePredictor):
         """Load the model into memory to make running multiple predictions efficient"""
         self.configs = {
             "realsrx4": OmegaConf.load("./configs/realsr_swinunet_realesrgan256.yaml"),
-            "bicsrx4": OmegaConf.load("./configs/bicubic_swinunet_bicubic256.yaml"),
+            "bicsrx4_opencv": OmegaConf.load("./configs/bicubic_swinunet_bicubic256.yaml"),
+            "bicsrx4_matlab": OmegaConf.load("./configs/bicubic_swinunet_bicubic256.yaml"),
         }
 
     def predict(
@@ -25,7 +26,7 @@ class Predictor(BasePredictor):
             choices=[512, 256], description="Chopping forward.", default=512
         ),
         task: str = Input(
-            choices=["realsrx4", "bicsrx4"],
+            choices=["realsrx4", "bicsrx4_opencv", "bicsrx4_matlab"],
             description="Choose a task",
             default="realsrx4",
         ),
@@ -44,6 +45,8 @@ class Predictor(BasePredictor):
         configs.diffusion.params.steps = 15
         configs.diffusion.params.sf = scale
         configs.autoencoder.ckpt_path = f"weights/autoencoder_vq_f4.pth"
+        if task == "bicsrx4_matlab":
+            configs.diffusion.params.kappa = 2.0
 
         chop_stride = 448 if chop_size == 512 else 224
 
