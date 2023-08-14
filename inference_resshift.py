@@ -30,7 +30,7 @@ def get_parser(**parser_kwargs):
             "--task",
             type=str,
             default="realsrx4",
-            choices=['realsrx4', 'bicsrx4_cv2', 'bicsrx4_matlab'],
+            choices=['realsrx4', 'bicsrx4_opencv', 'bicsrx4_matlab'],
             help="Chopping forward.",
             )
     args = parser.parse_args()
@@ -40,7 +40,7 @@ def get_parser(**parser_kwargs):
 def get_configs(args):
     if args.task == 'realsrx4':
         configs = OmegaConf.load('./configs/realsr_swinunet_realesrgan256.yaml')
-    elif args.task == 'bicsrx4_cv2':
+    elif args.task == 'bicsrx4_opencv':
         configs = OmegaConf.load('./configs/bicubic_swinunet_bicubic256.yaml')
     elif args.task == 'bicsrx4_matlab':
         configs = OmegaConf.load('./configs/bicubic_swinunet_bicubic256.yaml')
