@@ -53,8 +53,8 @@ def predict(in_path, task='realsrx4', seed=12345):
     configs = get_configs(task)
     resshift_sampler = ResShiftSampler(
             configs,
-            chop_size=512,
-            chop_stride=448,
+            chop_size=256,
+            chop_stride=224,
             chop_bs=1,
             use_fp16=True,
             seed=seed,
