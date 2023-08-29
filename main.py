@@ -25,7 +25,7 @@ def get_parser(**parser_kwargs):
     parser.add_argument(
             "--cfg_path",
             type=str,
-            default="./configs/training/realsr_swinunt_realesrgan256.yaml",
+            default="./configs/realsr_swinunet_realesrgan256.yaml",
             help="Configs of yaml file",
             )
     parser.add_argument(
@@ -47,7 +47,7 @@ if __name__ == "__main__":
     # merge args to config
     for key in vars(args):
         if key in ['cfg_path', 'save_dir', 'resume', ]:
-        configs[key] = getattr(args, key)
+            configs[key] = getattr(args, key)
 
     trainer = Trainer(configs)
     trainer.train()
