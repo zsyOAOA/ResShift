@@ -95,8 +95,8 @@ data:
     params:
       dir_paths: []
       txt_file_path: [
-                      '/mnt/lustre/zsyue/disk/data/ImageNet/train/image_path_all.txt', 
-                      '/mnt/lustre/zsyue/disk/data/FFHQ/files_txt/ffhq256.txt',
+                      '/mnt/lustre/zsyue/database/ImageNet/train/image_path_all.txt', 
+                      '/mnt/lustre/zsyue/database/FFHQ/files_txt/ffhq256.txt',
                      ] 
       im_exts: ['JPEG', ]
       io_backend:
