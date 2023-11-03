@@ -25,7 +25,7 @@
 
 ## Requirements
 * Python 3.9.16, Pytorch 1.12.1, [xformers](https://github.com/facebookresearch/xformers) 0.0.20
-* More detail (See [environment.yml](environment.yml))
+* More detail (See [environment.yaml](environment.yml))
 A suitable [conda](https://conda.io/) environment named `ResShift` can be created and activated with:
 
 ```
