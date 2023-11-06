@@ -678,13 +678,14 @@ class TrainerDifIR(TrainerBase):
                 self.loss_mean = {key:torch.zeros(size=(len(record_steps),), dtype=torch.float64)
                                   for key in loss.keys()}
                 self.loss_count = torch.zeros(size=(len(record_steps),), dtype=torch.float64)
-            for key, value in loss.items():
-                for jj in range(len(record_steps)):
+            
+            for jj in range(len(record_steps)):
+                for key, value in loss.items():
                     index = record_steps[jj] - 1
                     mask = torch.where(tt == index, torch.ones_like(tt), torch.zeros_like(tt))
                     current_loss = torch.sum(value.detach() * mask)
                     self.loss_mean[key][jj] += current_loss.item()
-                    self.loss_count[jj] += mask.sum().item()
+                self.loss_count[jj] += mask.sum().item()
 
             if self.current_iters % self.configs.train.log_freq[0] == 0 and flag:
                 if torch.any(self.loss_count == 0):
