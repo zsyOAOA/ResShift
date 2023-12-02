@@ -15,6 +15,7 @@
 
 ---
 ## Update
+- **2023.12.02**: Add configurations for the x2 super-resolution task.
 - **2023.08.15**: Add [![OpenXLab](https://img.shields.io/badge/Demo-%F0%9F%90%BC%20OpenXLab-blue)](https://openxlab.org.cn/apps/detail/Zongsheng/ResShift).
 - **2023.08.15**: Add Gradio Demo.
 - **2023.08.14**: Add bicubic (matlab resize) model.
@@ -50,15 +51,15 @@ CUDA_VISIBLE_DEVICES=gpu_id python app.py
 ## Inference
 #### :tiger: Real-world image super-resolution
 ```
-CUDA_VISIBLE_DEVICES=gpu_id python inference_resshift.py -i [image folder/image path] -o [result folder] --task realsrx4 --chop_size 512
+CUDA_VISIBLE_DEVICES=gpu_id python inference_resshift.py -i [image folder/image path] -o [result folder] --scale 4 --task realsrx4 --chop_size 512
 ```
 #### :lion: Bicubic (resize by Opencv) image super-resolution
 ```
-CUDA_VISIBLE_DEVICES=gpu_id python inference_resshift.py -i [image folder/image path] -o [result folder] --task bicsrx4_cv2 --chop_size 512
+CUDA_VISIBLE_DEVICES=gpu_id python inference_resshift.py -i [image folder/image path] -o [result folder] --scale 4 --task bicsrx4_cv2 --chop_size 512
 ```
 #### :lion: Bicubic (resize by Matlab) image super-resolution
 ```
-CUDA_VISIBLE_DEVICES=gpu_id python inference_resshift.py -i [image folder/image path] -o [result folder] --task bicsrx4_matlab --chop_size 512
+CUDA_VISIBLE_DEVICES=gpu_id python inference_resshift.py -i [image folder/image path] -o [result folder] --scale 4 --task bicsrx4_matlab --chop_size 512
 ```
 
 ## Training
@@ -73,6 +74,15 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 --nnodes=1
 ```
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 --nnodes=1 main.py --cfg_path configs/bicubic_swinunet_bicubic256.yaml --save_dir [Logging Folder]  --steps 15
 ```
+
+## Note on General Restoration Task
+For general restoration task, please adjust the settings in the config file:
+```
+model.params.lq_size: resolution of the low-quality image.   # should be divided by 64
+diffusion.params.sf: scale factor for super-resolution,  1 for restoration task.
+degradation.sf: scale factor for super-resolution, 1 for restoration task.   # only required for the pipeline of Real-Esrgan     
+```
+In some cases, you need to rewrite the data loading process. 
 
 ## License
 
