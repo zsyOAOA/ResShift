@@ -77,11 +77,13 @@ def get_configs(args):
         Path(args.out_path).mkdir(parents=True)
 
     if args.chop_size == 512:
-        chop_stride = 448
+        chop_stride = (512 - 64) * (4 // args.scale)
     elif args.chop_size == 256:
-        chop_stride = 224
+        chop_stride = (256 - 32) * (4 // args.scale)
     else:
-        raise ValueError("Chop size must be in [512, 384, 256]")
+        raise ValueError("Chop size must be in [512, 256]")
+    args.chop_size *= (4 // args.scale)
+    print(f"Chopping size/stride: {args.chop_size}/{chop_stride}")
 
     return configs, chop_stride
 
