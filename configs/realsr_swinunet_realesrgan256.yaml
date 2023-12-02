@@ -3,10 +3,9 @@ model:
   ckpt_path: ~
   params:
     image_size: 64
-    in_channels: 6
+    in_channels: 3
     model_channels: 160
     out_channels: 3
-    cond_lq: True
     attention_resolutions: [64,32,16,8]
     dropout: 0
     channel_mult: [1, 2, 2, 4]
@@ -21,6 +20,8 @@ model:
     swin_embed_dim: 192
     window_size: 8
     mlp_ratio: 4
+    cond_lq: True
+    lq_size: 64
 
 diffusion:
   target: models.script_util.create_gaussian_diffusion

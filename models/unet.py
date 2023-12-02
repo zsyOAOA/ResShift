@@ -560,7 +560,7 @@ class UNetModel(nn.Module):
         ), "must specify y if and only if the model is class-conditional"
 
         hs = []
-        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels)).type(self.dtype)
 
         if self.num_classes is not None:
             assert y.shape == (x.shape[0],)
@@ -583,6 +583,22 @@ class UNetModel(nn.Module):
         h = h.type(x.dtype)
         out = self.out(h)
         return out
+
+    def convert_to_fp16(self):
+        """
+        Convert the torso of the model to float16.
+        """
+        self.input_blocks.apply(convert_module_to_f16)
+        self.middle_block.apply(convert_module_to_f16)
+        self.output_blocks.apply(convert_module_to_f16)
+
+    def convert_to_fp32(self):
+        """
+        Convert the torso of the model to float32.
+        """
+        self.input_blocks.apply(convert_module_to_f32)
+        self.middle_block.apply(convert_module_to_f32)
+        self.output_blocks.apply(convert_module_to_f32)
 
 class UNetModelSwin(nn.Module):
     """
@@ -621,7 +637,6 @@ class UNetModelSwin(nn.Module):
         out_channels,
         num_res_blocks,
         attention_resolutions,
-        cond_lq=True,
         dropout=0,
         channel_mult=(1, 2, 4, 8),
         conv_resample=True,
@@ -636,6 +651,8 @@ class UNetModelSwin(nn.Module):
         window_size=8,
         mlp_ratio=2.0,
         patch_norm=False,
+        cond_lq=True,
+        lq_size=256,
     ):
         super().__init__()
 
@@ -667,7 +684,23 @@ class UNetModelSwin(nn.Module):
             linear(time_embed_dim, time_embed_dim),
         )
 
+        if cond_lq and lq_size == image_size:
+            self.feature_extractor = nn.Identity()
+            base_chn = 3
+        else:
+            feature_extractor = []
+            feature_chn = 3
+            base_chn = 16
+            for ii in range(int(math.log(lq_size / image_size) / math.log(2))):
+                feature_extractor.append(nn.Conv2d(feature_chn, base_chn, 3, 1, 1))
+                feature_extractor.append(nn.SiLU())
+                feature_extractor.append(Downsample(base_chn, True, out_channels=base_chn*2))
+                base_chn *= 2
+                feature_chn = base_chn
+            self.feature_extractor = nn.Sequential(*feature_extractor)
+
         ch = input_ch = int(channel_mult[0] * model_channels)
+        in_channels += base_chn
         self.input_blocks = nn.ModuleList(
             [TimestepEmbedSequential(conv_nd(dims, in_channels, ch, 3, padding=1))]
         )
@@ -835,15 +868,14 @@ class UNetModelSwin(nn.Module):
         :param lq: an [N x C x ...] Tensor of low quality iamge.
         :return: an [N x C x ...] Tensor of outputs.
         """
-
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels)).type(self.dtype)
 
         if lq is not None:
             assert self.cond_lq
-            if lq.shape[2:] != x.shape[2:]:
-                lq = F.pixel_unshuffle(lq, 2)
+            lq = self.feature_extractor(lq)
             x = th.cat([x, lq], dim=1)
+
 
         h = x.type(self.dtype)
         for ii, module in enumerate(self.input_blocks):
