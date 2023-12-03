@@ -55,7 +55,7 @@ CUDA_VISIBLE_DEVICES=gpu_id python inference_resshift.py -i [image folder/image 
 ```
 #### :lion: Bicubic (resize by Opencv) image super-resolution
 ```
-CUDA_VISIBLE_DEVICES=gpu_id python inference_resshift.py -i [image folder/image path] -o [result folder] --scale 4 --task bicsrx4_cv2 --chop_size 512
+CUDA_VISIBLE_DEVICES=gpu_id python inference_resshift.py -i [image folder/image path] -o [result folder] --scale 4 --task bicsrx4_opencv --chop_size 512
 ```
 #### :lion: Bicubic (resize by Matlab) image super-resolution
 ```
