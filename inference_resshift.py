@@ -85,12 +85,15 @@ def get_configs(args):
     args.chop_size *= (4 // args.scale)
     print(f"Chopping size/stride: {args.chop_size}/{chop_stride}")
 
-    return configs, chop_stride
+    autoencoder_scale = 2 ** (len(configs.autoencoder.params.ddconfig.ch_mult) - 1)
+    desired_min_size = 64 * (autoencoder_scale // args.scale)
+
+    return configs, chop_stride, desired_min_size
 
 def main():
     args = get_parser()
 
-    configs, chop_stride = get_configs(args)
+    configs, chop_stride, desired_min_size = get_configs(args)
 
     resshift_sampler = ResShiftSampler(
             configs,
@@ -99,6 +102,7 @@ def main():
             chop_bs=1,
             use_fp16=True,
             seed=args.seed,
+            desired_min_size=desired_min_size,
             )
 
     resshift_sampler.inference(args.in_path, args.out_path, bs=1, noise_repeat=False)
