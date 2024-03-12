@@ -121,6 +121,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --standalone --nproc_per_node=8 --
 
 + Synthetic data for face image inpainting: [Link](https://drive.google.com/file/d/1nyfry2XjgA_qV8fS2_Y5TNQwtG5Irwux/view?usp=sharing) 
 
++ Synthetic data for blind face restoration: [Link](scripts/prepare_testing_celeba_faceir.py) 
+
 #### :rocket: Image super-resolution
 Reproduce the results in Table 3 of our NeurIPS paper:
 ```
