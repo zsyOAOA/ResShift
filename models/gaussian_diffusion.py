@@ -1,6 +1,7 @@
 import enum
 import math
 
+import torch
 import numpy as np
 import torch as th
 import torch.nn.functional as F
@@ -48,7 +49,8 @@ def get_named_eta_schedule(
         # xx = np.linspace(start, end, num_diffusion_timesteps, endpoint=True, dtype=np.float64)
         # sqrt_etas = xx**ponential
         power = kwargs.get('power', None)
-        etas_start = min(min_noise_level / kappa, min_noise_level, math.sqrt(0.001))
+        # etas_start = min(min_noise_level / kappa, min_noise_level, math.sqrt(0.001))
+        etas_start = min(min_noise_level / kappa, min_noise_level)
         increaser = math.exp(1/(num_diffusion_timesteps-1)*math.log(etas_end/etas_start))
         base = np.ones([num_diffusion_timesteps, ]) * increaser
         power_timestep = np.linspace(0, 1, num_diffusion_timesteps, endpoint=True)**power
@@ -367,6 +369,7 @@ class GaussianDiffusion:
         y,
         model,
         first_stage_model=None,
+        consistencydecoder=None,
         noise=None,
         noise_repeat=False,
         clip_denoised=True,
@@ -407,7 +410,13 @@ class GaussianDiffusion:
             progress=progress,
         ):
             final = sample["sample"]
-        return self.decode_first_stage(final, first_stage_model)
+        with th.no_grad():
+            out = self.decode_first_stage(
+                    final,
+                    first_stage_model=first_stage_model,
+                    consistencydecoder=consistencydecoder,
+                    )
+        return out
 
     def p_sample_loop_progressive(
             self, y, model,
@@ -462,29 +471,48 @@ class GaussianDiffusion:
                 yield out
                 z_sample = out["sample"]
 
-    def decode_first_stage(self, z_sample, first_stage_model=None):
-        ori_dtype = z_sample.dtype
+    def decode_first_stage(self, z_sample, first_stage_model=None, consistencydecoder=None):
+        batch_size = z_sample.shape[0]
+        data_dtype = z_sample.dtype
+
+        if consistencydecoder is None:
+            model = first_stage_model
+            decoder = first_stage_model.decode
+            model_dtype = next(model.parameters()).dtype
+        else:
+            model = consistencydecoder
+            decoder = consistencydecoder
+            model_dtype = next(model.ckpt.parameters()).dtype
+
         if first_stage_model is None:
             return z_sample
         else:
-            with th.no_grad():
-                z_sample = 1 / self.scale_factor * z_sample
-                z_sample = z_sample.type(next(first_stage_model.parameters()).dtype)
-                out = first_stage_model.decode(z_sample)
-                return out.type(ori_dtype)
+            z_sample = 1 / self.scale_factor * z_sample
+            if consistencydecoder is None:
+                out = decoder(z_sample.type(model_dtype))
+            else:
+                with th.cuda.amp.autocast():
+                    out = decoder(z_sample)
+            if not model_dtype == data_dtype:
+                out = out.type(data_dtype)
+            return out
 
     def encode_first_stage(self, y, first_stage_model, up_sample=False):
-        ori_dtype = y.dtype
-        if up_sample:
+        data_dtype = y.dtype
+        model_dtype = next(first_stage_model.parameters()).dtype
+        if up_sample and self.sf != 1:
             y = F.interpolate(y, scale_factor=self.sf, mode='bicubic')
         if first_stage_model is None:
             return y
         else:
+            if not model_dtype == data_dtype:
+                y = y.type(model_dtype)
             with th.no_grad():
-                y = y.type(dtype=next(first_stage_model.parameters()).dtype)
                 z_y = first_stage_model.encode(y)
                 out = z_y * self.scale_factor
-                return out.type(ori_dtype)
+            if not model_dtype == data_dtype:
+                out = out.type(data_dtype)
+            return out
 
     def prior_sample(self, y, noise=None):
         """
@@ -517,6 +545,7 @@ class GaussianDiffusion:
         :param model_kwargs: if not None, a dict of extra keyword arguments to
             pass to the model. This can be used for conditioning.
         :param noise: if specified, the specific Gaussian noise to try to remove.
+        :param up_sample_lq: Upsampling low-quality image before encoding
         :return: a dict with the key "loss" containing a tensor of shape [N].
                  Some mean or variance settings may also have other keys.
         """
@@ -549,18 +578,18 @@ class GaussianDiffusion:
                 weights = _extract_into_tensor(self.weight_loss_mse, t, t.shape)
             else:
                 weights = 1
-            terms["loss"] = terms["mse"] * weights
+            terms["mse"] *= weights
         else:
             raise NotImplementedError(self.loss_type)
 
         if self.model_mean_type == ModelMeanType.START_X:      # predict x_0
-            pred_zstart = model_output.detach()
+            pred_zstart = model_output
         elif self.model_mean_type == ModelMeanType.EPSILON:
-            pred_zstart = self._predict_xstart_from_eps(x_t=z_t, y=z_y, t=t, eps=model_output.detach())
+            pred_zstart = self._predict_xstart_from_eps(x_t=z_t, y=z_y, t=t, eps=model_output)
         elif self.model_mean_type == ModelMeanType.RESIDUAL:
-            pred_zstart = self._predict_xstart_from_residual(y=z_y, residual=model_output.detach())
+            pred_zstart = self._predict_xstart_from_residual(y=z_y, residual=model_output)
         elif self.model_mean_type == ModelMeanType.EPSILON_SCALE:
-            pred_zstart = self._predict_xstart_from_eps_scale(x_t=z_t, y=z_y, t=t, eps=model_output.detach())
+            pred_zstart = self._predict_xstart_from_eps_scale(x_t=z_t, y=z_y, t=t, eps=model_output)
         else:
             raise NotImplementedError(self.model_mean_type)
 
@@ -578,136 +607,6 @@ class GaussianDiffusion:
         else:
             inputs_norm = inputs
         return inputs_norm
-
-    def ddim_sample(
-        self,
-        model,
-        x,
-        y,
-        t,
-        clip_denoised=True,
-        denoised_fn=None,
-        model_kwargs=None,
-        ddim_eta=0.0,
-    ):
-        """
-        Sample x_{t-1} from the model using DDIM.
-
-        Same usage as p_sample().
-        """
-        out = self.p_mean_variance(
-            model=model,
-            x_t=x,
-            y=y,
-            t=t,
-            clip_denoised=clip_denoised,
-            denoised_fn=denoised_fn,
-            model_kwargs=model_kwargs,
-        )
-        pred_xstart = out["pred_xstart"]
-        residual = y - pred_xstart
-        eps = self._predict_eps_from_xstart(x, y, t, pred_xstart)
-        etas = _extract_into_tensor(self.etas, t, x.shape)
-        etas_prev = _extract_into_tensor(self.etas_prev, t, x.shape)
-        alpha = _extract_into_tensor(self.alpha, t, x.shape)
-        sigma = ddim_eta * self.kappa * th.sqrt(etas_prev / etas) * th.sqrt(alpha)
-        noise = th.randn_like(x)
-        mean_pred = (
-            pred_xstart + etas_prev * residual
-            + th.sqrt(etas_prev*self.kappa**2 - sigma**2) * eps
-        )
-        nonzero_mask = (
-            (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
-        )  # no noise when t == 0
-        sample = mean_pred + nonzero_mask * sigma * noise
-        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
-
-    def ddim_sample_loop(
-        self,
-        y,
-        model,
-        noise=None,
-        first_stage_model=None,
-        start_timesteps=None,
-        clip_denoised=True,
-        denoised_fn=None,
-        model_kwargs=None,
-        device=None,
-        progress=False,
-        ddim_eta=0.0,
-    ):
-        """
-        Generate samples from the model using DDIM.
-
-        Same usage as p_sample_loop().
-        """
-        final = None
-        for sample in self.ddim_sample_loop_progressive(
-            y=y,
-            model=model,
-            noise=noise,
-            first_stage_model=first_stage_model,
-            clip_denoised=clip_denoised,
-            denoised_fn=denoised_fn,
-            model_kwargs=model_kwargs,
-            device=device,
-            progress=progress,
-            ddim_eta=ddim_eta,
-        ):
-            final = sample
-        return self.decode_first_stage(final["sample"], first_stage_model)
-
-    def ddim_sample_loop_progressive(
-        self,
-        y,
-        model,
-        noise=None,
-        first_stage_model=None,
-        clip_denoised=True,
-        denoised_fn=None,
-        model_kwargs=None,
-        device=None,
-        progress=False,
-        ddim_eta=0.0,
-    ):
-        """
-        Use DDIM to sample from the model and yield intermediate samples from
-        each timestep of DDIM.
-
-        Same usage as p_sample_loop_progressive().
-        """
-        if device is None:
-            device = next(model.parameters()).device
-        z_y = self.encode_first_stage(y, first_stage_model, up_sample=True)
-        z_sample = self.prior_sample(z_y, noise)
-
-        if noise is not None:
-            img = noise
-        else:
-            img = th.randn_like(z_sample, device=device)
-
-        indices = list(range(self.num_timesteps))[::-1]
-        if progress:
-            # Lazy import so that we don't depend on tqdm.
-            from tqdm.auto import tqdm
-
-            indices = tqdm(indices)
-
-        for i in indices:
-            t = th.tensor([i] * z_y.shape[0], device=device)
-            with th.no_grad():
-                out = self.ddim_sample(
-                    model=model,
-                    x=img,
-                    y=z_y,
-                    t=t,
-                    clip_denoised=clip_denoised,
-                    denoised_fn=denoised_fn,
-                    model_kwargs=model_kwargs,
-                    ddim_eta=ddim_eta,
-                )
-                yield out
-                img = out["sample"]
 
 class GaussianDiffusionDDPM:
     """

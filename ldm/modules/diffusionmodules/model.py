@@ -459,9 +459,13 @@ class Encoder(nn.Module):
         self.ch = ch
         self.temb_ch = 0
         self.num_resolutions = len(ch_mult)
-        self.num_res_blocks = num_res_blocks
         self.resolution = resolution
         self.in_channels = in_channels
+        if isinstance(num_res_blocks, int):
+            num_res_blocks = [num_res_blocks, ] * len(ch_mult)
+        else:
+            assert len(num_res_blocks) == len(ch_mult)
+        self.num_res_blocks = num_res_blocks
 
         # downsampling
         self.conv_in = torch.nn.Conv2d(in_channels,
@@ -479,7 +483,7 @@ class Encoder(nn.Module):
             attn = nn.ModuleList()
             block_in = ch*in_ch_mult[i_level]
             block_out = ch*ch_mult[i_level]
-            for i_block in range(self.num_res_blocks):
+            for i_block in range(self.num_res_blocks[i_level]):
                 block.append(ResnetBlock(in_channels=block_in,
                                          out_channels=block_out,
                                          temb_channels=self.temb_ch,
@@ -522,7 +526,7 @@ class Encoder(nn.Module):
         # downsampling
         hs = [self.conv_in(x)]
         for i_level in range(self.num_resolutions):
-            for i_block in range(self.num_res_blocks):
+            for i_block in range(self.num_res_blocks[i_level]):
                 h = self.down[i_level].block[i_block](hs[-1], temb)
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
@@ -553,11 +557,15 @@ class Decoder(nn.Module):
         self.ch = ch
         self.temb_ch = 0
         self.num_resolutions = len(ch_mult)
-        self.num_res_blocks = num_res_blocks
         self.resolution = resolution
         self.in_channels = in_channels
         self.give_pre_end = give_pre_end
         self.tanh_out = tanh_out
+        if isinstance(num_res_blocks, int):
+            num_res_blocks = [num_res_blocks, ] * len(ch_mult)
+        else:
+            assert len(num_res_blocks) == len(ch_mult)
+        self.num_res_blocks = num_res_blocks
 
         # compute in_ch_mult, block_in and curr_res at lowest res
         in_ch_mult = (1,)+tuple(ch_mult)
@@ -592,7 +600,7 @@ class Decoder(nn.Module):
             block = nn.ModuleList()
             attn = nn.ModuleList()
             block_out = ch*ch_mult[i_level]
-            for i_block in range(self.num_res_blocks+1):
+            for i_block in range(self.num_res_blocks[i_level]+1):
                 block.append(ResnetBlock(in_channels=block_in,
                                          out_channels=block_out,
                                          temb_channels=self.temb_ch,
@@ -633,7 +641,7 @@ class Decoder(nn.Module):
 
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
-            for i_block in range(self.num_res_blocks+1):
+            for i_block in range(self.num_res_blocks[i_level]+1):
                 h = self.up[i_level].block[i_block](h, temb)
                 if len(self.up[i_level].attn) > 0:
                     h = self.up[i_level].attn[i_block](h)

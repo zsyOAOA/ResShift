@@ -741,7 +741,7 @@ def add_jpg_compression(img, quality=90):
             float32.
     """
     img = np.clip(img, 0, 1)
-    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
     _, encimg = cv2.imencode('.jpg', img * 255., encode_param)
     img = np.float32(cv2.imdecode(encimg, 1)) / 255.
     return img

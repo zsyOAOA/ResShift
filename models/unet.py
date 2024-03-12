@@ -282,10 +282,10 @@ class QKVAttentionLegacy(nn.Module):
         ch = width // (3 * self.n_heads)
         if XFORMERS_IS_AVAILBLE:
             # qkv: b x length x heads x 3ch
-            qkv = qkv.reshape(bs, self.n_heads, ch * 3, length).permute(0, 3, 1, 2).contiguous()
+            qkv = qkv.reshape(bs, self.n_heads, ch * 3, length).permute(0, 3, 1, 2).to(memory_format=th.contiguous_format)
             q, k, v = qkv.split(ch, dim=3)  # b x length x heads x ch
             a = xop.memory_efficient_attention(q, k, v, p=0.0)  # b x length x heads x ch
-            out = a.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, length)
+            out = a.permute(0, 2, 3, 1).to(memory_format=th.contiguous_format).reshape(bs, -1, length)
         else:
             # q,k, v: (b*heads) x ch x length
             q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
@@ -322,10 +322,10 @@ class QKVAttention(nn.Module):
         ch = width // (3 * self.n_heads)
         if XFORMERS_IS_AVAILBLE:
             # qkv: b x length x heads x 3ch
-            qkv = qkv.reshape(bs, self.n_heads, ch * 3, length).permute(0, 3, 1, 2).contiguous()
+            qkv = qkv.reshape(bs, self.n_heads, ch * 3, length).permute(0, 3, 1, 2).to(memory_format=th.contiguous_format)
             q, k, v = qkv.split(ch, dim=3)  # b x length x heads x ch
             a = xop.memory_efficient_attention(q, k, v, p=0.0)  # b x length x heads x length
-            out = a.permute(0, 2, 3, 1).contiguous().reshape(bs, -1, length)
+            out = a.permute(0, 2, 3, 1).to(memory_format=th.contiguous_format).reshape(bs, -1, length)
         else:
             q, k, v = qkv.chunk(3, dim=1)  # b x heads*ch x length
             scale = 1 / math.sqrt(math.sqrt(ch))
@@ -652,6 +652,7 @@ class UNetModelSwin(nn.Module):
         mlp_ratio=2.0,
         patch_norm=False,
         cond_lq=True,
+        cond_mask=False,
         lq_size=256,
     ):
         super().__init__()
@@ -676,6 +677,7 @@ class UNetModelSwin(nn.Module):
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.cond_lq = cond_lq
+        self.cond_mask = cond_mask
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -686,10 +688,10 @@ class UNetModelSwin(nn.Module):
 
         if cond_lq and lq_size == image_size:
             self.feature_extractor = nn.Identity()
-            base_chn = 3
+            base_chn = 4 if cond_mask else 3
         else:
             feature_extractor = []
-            feature_chn = 3
+            feature_chn = 4 if cond_mask else 3
             base_chn = 16
             for ii in range(int(math.log(lq_size / image_size) / math.log(2))):
                 feature_extractor.append(nn.Conv2d(feature_chn, base_chn, 3, 1, 1))
@@ -860,7 +862,7 @@ class UNetModelSwin(nn.Module):
             conv_nd(dims, input_ch, out_channels, 3, padding=1),
         )
 
-    def forward(self, x, timesteps, lq=None):
+    def forward(self, x, timesteps, lq=None, mask=None):
         """
         Apply the model to an input batch.
         :param x: an [N x C x ...] Tensor of inputs.
@@ -873,7 +875,10 @@ class UNetModelSwin(nn.Module):
 
         if lq is not None:
             assert self.cond_lq
-            lq = self.feature_extractor(lq)
+            if mask is not None:
+                assert self.cond_mask
+                lq = th.cat([lq, mask], dim=1)
+            lq = self.feature_extractor(lq.type(self.dtype))
             x = th.cat([x, lq], dim=1)
 
 
@@ -894,6 +899,7 @@ class UNetModelSwin(nn.Module):
         Convert the torso of the model to float16.
         """
         self.input_blocks.apply(convert_module_to_f16)
+        self.feature_extractor.apply(convert_module_to_f16)
         self.middle_block.apply(convert_module_to_f16)
         self.output_blocks.apply(convert_module_to_f16)
 

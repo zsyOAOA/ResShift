@@ -11,8 +11,18 @@ from copy import deepcopy
 from omegaconf import OmegaConf
 from collections import OrderedDict
 from einops import rearrange
+from contextlib import nullcontext
 
 from datapipe.datasets import create_dataset
+
+from utils import util_net
+from utils import util_common
+from utils import util_image
+
+from basicsr.utils import DiffJPEG, USMSharp
+from basicsr.utils.img_process_util import filter2D
+from basicsr.data.transforms import paired_random_crop
+from basicsr.data.degradations import random_add_gaussian_noise_pt, random_add_poisson_noise_pt
 
 import torch
 import torch.nn as nn
@@ -25,14 +35,6 @@ import torchvision.utils as vutils
 # from torch.utils.tensorboard import SummaryWriter
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from utils import util_net
-from utils import util_common
-from utils import util_image
-
-from basicsr.utils import DiffJPEG, USMSharp
-from basicsr.utils.img_process_util import filter2D
-from basicsr.data.transforms import paired_random_crop
-from basicsr.data.degradations import random_add_gaussian_noise_pt, random_add_poisson_noise_pt
 
 class TrainerBase:
     def __init__(self, configs):
@@ -77,62 +79,68 @@ class TrainerBase:
         torch.manual_seed(seed)
 
     def init_logger(self):
-        # only should be run on rank: 0
         if self.configs.resume:
             assert self.configs.resume.endswith(".pth")
             save_dir = Path(self.configs.resume).parents[1]
+            project_id = save_dir.name
         else:
-            save_dir = Path(self.configs.save_dir) / datetime.datetime.now().strftime("%Y-%m-%d-%H-%M")
+            project_id = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M")
+            save_dir = Path(self.configs.save_dir) / project_id
             if not save_dir.exists() and self.rank == 0:
                 save_dir.mkdir(parents=True)
 
-        # text logging
+        # setting log counter
         if self.rank == 0:
-            logtxet_path = save_dir / 'training.log'
-            self.logger = logger
-            self.logger.remove()
-            self.logger.add(logtxet_path, format="{message}", mode='a')
-            self.logger.add(sys.stdout, format="{message}", level="INFO")
-
-        # tensorboard logging
-        if self.rank == 0:
-            # log_dir = save_dir / 'tf_logs'
-            # if not log_dir.exists():
-                # log_dir.mkdir()
-            # self.writer = SummaryWriter(str(log_dir))
             self.log_step = {phase: 1 for phase in ['train', 'val']}
             self.log_step_img = {phase: 1 for phase in ['train', 'val']}
 
-        # image saving
-        if self.rank == 0 and self.configs.train.save_images:
+        # text logging
+        logtxet_path = save_dir / 'training.log'
+        if self.rank == 0:
+            if logtxet_path.exists():
+                assert self.configs.resume
+            self.logger = logger
+            self.logger.remove()
+            self.logger.add(logtxet_path, format="{message}", mode='a', level='INFO')
+            self.logger.add(sys.stdout, format="{message}")
+
+        # tensorboard logging
+        log_dir = save_dir / 'tf_logs'
+        self.tf_logging = self.configs.train.tf_logging
+        if self.rank == 0 and self.tf_logging:
+            if not log_dir.exists():
+                log_dir.mkdir()
+            self.writer = SummaryWriter(str(log_dir))
+
+        # checkpoint saving
+        ckpt_dir = save_dir / 'ckpts'
+        self.ckpt_dir = ckpt_dir
+        if self.rank == 0 and (not ckpt_dir.exists()):
+            ckpt_dir.mkdir()
+        if 'ema_rate' in self.configs.train:
+            self.ema_rate = self.configs.train.ema_rate
+            assert isinstance(self.ema_rate, float), "Ema rate must be a float number"
+            ema_ckpt_dir = save_dir / 'ema_ckpts'
+            self.ema_ckpt_dir = ema_ckpt_dir
+            if self.rank == 0 and (not ema_ckpt_dir.exists()):
+                ema_ckpt_dir.mkdir()
+
+        # save images into local disk
+        self.local_logging = self.configs.train.local_logging
+        if self.rank == 0 and self.local_logging:
             image_dir = save_dir / 'images'
             if not image_dir.exists():
                 (image_dir / 'train').mkdir(parents=True)
                 (image_dir / 'val').mkdir(parents=True)
             self.image_dir = image_dir
 
-        # checkpoint saving
-        if self.rank == 0:
-            ckpt_dir = save_dir / 'ckpts'
-            if not ckpt_dir.exists():
-                ckpt_dir.mkdir()
-            self.ckpt_dir = ckpt_dir
-
-        # ema checkpoint saving
-        if self.rank == 0 and hasattr(self, 'ema_rate'):
-            ema_ckpt_dir = save_dir / 'ema_ckpts'
-            if not ema_ckpt_dir.exists():
-                ema_ckpt_dir.mkdir()
-            self.ema_ckpt_dir = ema_ckpt_dir
-
         # logging the configurations
         if self.rank == 0:
             self.logger.info(OmegaConf.to_yaml(self.configs))
 
     def close_logger(self):
-        if self.rank == 0:
-            # self.writer.close()
-            pass
+        if self.rank == 0 and self.tf_logging:
+            self.writer.close()
 
     def resume_from_ckpt(self):
         def _load_ema_state(ema_state, ckpt):
@@ -144,7 +152,6 @@ class TrainerBase:
                 else:
                     ema_state[key] = deepcopy(ckpt[key].detach().data)
 
-
         if self.configs.resume:
             assert self.configs.resume.endswith(".pth") and os.path.isfile(self.configs.resume)
 
@@ -152,10 +159,11 @@ class TrainerBase:
                 self.logger.info(f"=> Loaded checkpoint from {self.configs.resume}")
             ckpt = torch.load(self.configs.resume, map_location=f"cuda:{self.rank}")
             util_net.reload_model(self.model, ckpt['state_dict'])
+            torch.cuda.empty_cache()
 
             # learning rate scheduler
             self.iters_start = ckpt['iters_start']
-            for ii in range(self.iters_start):
+            for ii in range(1, self.iters_start+1):
                 self.adjust_lr(ii)
 
             # logging
@@ -171,6 +179,13 @@ class TrainerBase:
                 _load_ema_state(self.ema_state, ema_ckpt)
             torch.cuda.empty_cache()
 
+            # AMP scaler
+            if self.amp_scaler is not None:
+                if "amp_scaler" in ckpt:
+                    self.amp_scaler.load_state_dict(ckpt["amp_scaler"])
+                    if self.rank == 0:
+                        self.logger.info("Loading scaler from resumed state...")
+
             # reset the seed
             self.setup_seed(seed=self.iters_start)
         else:
@@ -181,13 +196,39 @@ class TrainerBase:
                                            lr=self.configs.train.lr,
                                            weight_decay=self.configs.train.weight_decay)
 
+        # amp settings
+        self.amp_scaler = amp.GradScaler() if self.configs.train.use_amp else None
+
     def build_model(self):
         params = self.configs.model.get('params', dict)
         model = util_common.get_obj_from_str(self.configs.model.target)(**params)
+        model.cuda()
+        if self.configs.model.ckpt_path is not None:
+            ckpt_path = self.configs.model.ckpt_path
+            if self.rank == 0:
+                self.logger.info(f"Initializing model from {ckpt_path}")
+            ckpt = torch.load(ckpt_path, map_location=f"cuda:{self.rank}")
+            if 'state_dict' in ckpt:
+                ckpt = ckpt['state_dict']
+            util_net.reload_model(model, ckpt)
+        if self.configs.train.compile.flag:
+            if self.rank == 0:
+                self.logger.info("Begin compiling model...")
+            model = torch.compile(model, mode=self.configs.train.compile.mode)
+            if self.rank == 0:
+                self.logger.info("Compiling Done")
         if self.num_gpus > 1:
-            self.model = DDP(model.cuda(), device_ids=[self.rank,])  # wrap the network
+            self.model = DDP(model, device_ids=[self.rank,], static_graph=False)  # wrap the network
         else:
-            self.model = model.cuda()
+            self.model = model
+
+        # EMA
+        if self.rank == 0 and hasattr(self.configs.train, 'ema_rate'):
+            self.ema_model = deepcopy(model).cuda()
+            self.ema_state = OrderedDict(
+                {key:deepcopy(value.data) for key, value in self.model.state_dict().items()}
+                )
+            self.ema_ignore_keys = [x for x in self.ema_state.keys() if ('running_' in x or 'num_batches_tracked' in x)]
 
         # model information
         self.print_model_info()
@@ -218,8 +259,8 @@ class TrainerBase:
                         datasets['train'],
                         batch_size=self.configs.train.batch[0] // self.num_gpus,
                         shuffle=False if self.num_gpus > 1 else True,
-                        drop_last=False,
-                        num_workers=self.configs.train.get('num_workers', 4),
+                        drop_last=True,
+                        num_workers=min(self.configs.train.num_workers, 4),
                         pin_memory=True,
                         prefetch_factor=self.configs.train.get('prefetch_factor', 2),
                         worker_init_fn=my_worker_init_fn,
@@ -241,8 +282,8 @@ class TrainerBase:
     def print_model_info(self):
         if self.rank == 0:
             num_params = util_net.calculate_parameters(self.model) / 1000**2
-            self.logger.info("Detailed network architecture:")
-            self.logger.info(self.model.__repr__())
+            # self.logger.info("Detailed network architecture:")
+            # self.logger.info(self.model.__repr__())
             self.logger.info(f"Number of parameters: {num_params:.2f}M")
 
     def prepare_data(self, data, dtype=torch.float32, phase='train'):
@@ -295,16 +336,21 @@ class TrainerBase:
         pass
 
     def adjust_lr(self, current_iters=None):
-        assert hasattr(self, 'lr_sheduler')
-        self.lr_sheduler.step()
+        assert hasattr(self, 'lr_scheduler')
+        self.lr_scheduler.step()
 
     def save_ckpt(self):
         if self.rank == 0:
             ckpt_path = self.ckpt_dir / 'model_{:d}.pth'.format(self.current_iters)
-            torch.save({'iters_start': self.current_iters,
-                        'log_step': {phase:self.log_step[phase] for phase in ['train', 'val']},
-                        'log_step_img': {phase:self.log_step_img[phase] for phase in ['train', 'val']},
-                        'state_dict': self.model.state_dict()}, ckpt_path)
+            ckpt = {
+                    'iters_start': self.current_iters,
+                    'log_step': {phase:self.log_step[phase] for phase in ['train', 'val']},
+                    'log_step_img': {phase:self.log_step_img[phase] for phase in ['train', 'val']},
+                    'state_dict': self.model.state_dict(),
+                    }
+            if self.amp_scaler is not None:
+                ckpt['amp_scaler'] = self.amp_scaler.state_dict()
+            torch.save(ckpt, ckpt_path)
             if hasattr(self, 'ema_rate'):
                 ema_ckpt_path = self.ema_ckpt_dir / 'ema_model_{:d}.pth'.format(self.current_iters)
                 torch.save(self.ema_state, ema_ckpt_path)
@@ -317,6 +363,7 @@ class TrainerBase:
                 model_state = self.ema_state
             self.ema_model.load_state_dict(model_state)
 
+    @torch.no_grad()
     def update_ema_model(self):
         if self.num_gpus > 1:
             dist.barrier()
@@ -324,36 +371,80 @@ class TrainerBase:
             source_state = self.model.state_dict()
             rate = self.ema_rate
             for key, value in self.ema_state.items():
-                self.ema_state[key].mul_(rate).add_(source_state[key].detach().data, alpha=1-rate)
+                if key in self.ema_ignore_keys:
+                    self.ema_state[key] = source_state[key]
+                else:
+                    self.ema_state[key].mul_(rate).add_(source_state[key].detach().data, alpha=1-rate)
+
+    def logging_image(self, im_tensor, tag, phase, add_global_step=False, nrow=8):
+        """
+        Args:
+            im_tensor: b x c x h x w tensor
+            im_tag: str
+            phase: 'train' or 'val'
+            nrow: number of displays in each row
+        """
+        assert self.tf_logging or self.local_logging
+        im_tensor = vutils.make_grid(im_tensor, nrow=nrow, normalize=True, scale_each=True) # c x H x W
+        if self.local_logging:
+            im_path = str(self.image_dir / phase / f"{tag}-{self.log_step_img[phase]}.png")
+            im_np = im_tensor.cpu().permute(1,2,0).numpy()
+            util_image.imwrite(im_np, im_path)
+        if self.tf_logging:
+            self.writer.add_image(
+                    f"{phase}-{tag}-{self.log_step_img[phase]}",
+                    im_tensor,
+                    self.log_step_img[phase],
+                    )
+        if add_global_step:
+            self.log_step_img[phase] += 1
+
+    def logging_metric(self, metrics, tag, phase, add_global_step=False):
+        """
+        Args:
+            metrics: dict
+            tag: str
+            phase: 'train' or 'val'
+        """
+        if self.tf_logging:
+            tag = f"{phase}-{tag}"
+            if isinstance(metrics, dict):
+                self.writer.add_scalars(tag, metrics, self.log_step[phase])
+            else:
+                self.writer.add_scalar(tag, metrics, self.log_step[phase])
+            if add_global_step:
+                self.log_step[phase] += 1
+        else:
+            pass
+
+    def load_model(self, model, ckpt_path=None):
+        if self.rank == 0:
+            self.logger.info(f'Loading from {ckpt_path}...')
+        ckpt = torch.load(ckpt_path, map_location=f"cuda:{self.rank}")
+        if 'state_dict' in ckpt:
+            ckpt = ckpt['state_dict']
+        util_net.reload_model(model, ckpt)
+        if self.rank == 0:
+            self.logger.info('Loaded Done')
+
+    def freeze_model(self, net):
+        for params in net.parameters():
+            params.requires_grad = False
 
 class TrainerDifIR(TrainerBase):
-    def __init__(self, configs):
-        # ema settings
-        self.ema_rate = configs.train.ema_rate
-        super().__init__(configs)
+    def setup_optimizaton(self):
+        super().setup_optimizaton()
+        if self.configs.train.lr_schedule == 'cosin':
+            self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer=self.optimizer,
+                    T_max=self.configs.train.iterations - self.configs.train.warmup_iterations,
+                    eta_min=self.configs.train.lr_min,
+                    )
 
     def build_model(self):
-        params = self.configs.model.get('params', dict)
-        model = util_common.get_obj_from_str(self.configs.model.target)(**params)
-        if self.num_gpus > 1:
-            self.model = DDP(model.cuda(), device_ids=[self.rank,])  # wrap the network
-        else:
-            self.model = model.cuda()
-        if self.configs.model.ckpt_path is not None:
-            ckpt_path = self.configs.model.ckpt_path
-            if self.rank == 0:
-                self.logger.info(f"Initializing model from {ckpt_path}")
-            ckpt = torch.load(ckpt_path, map_location=f"cuda:{self.rank}")
-            if 'state_dict' in ckpt:
-                ckpt = ckpt['state_dict']
-            util_net.reload_model(self.model, ckpt)
-
-        # EMA
-        if self.rank == 0:
-            self.ema_model = deepcopy(model).cuda()
-            self.ema_state = OrderedDict(
-                {key:deepcopy(value.data) for key, value in self.model.state_dict().items()}
-                )
+        super().build_model()
+        if self.rank == 0 and hasattr(self.configs.train, 'ema_rate'):
+            self.ema_ignore_keys.extend([x for x in self.ema_state.keys() if 'relative_position_index' in x])
 
         # autoencoder
         if self.configs.autoencoder is not None:
@@ -362,26 +453,36 @@ class TrainerDifIR(TrainerBase):
                 self.logger.info(f"Restoring autoencoder from {self.configs.autoencoder.ckpt_path}")
             params = self.configs.autoencoder.get('params', dict)
             autoencoder = util_common.get_obj_from_str(self.configs.autoencoder.target)(**params)
+            autoencoder.cuda()
             autoencoder.load_state_dict(ckpt, True)
             for params in autoencoder.parameters():
                 params.requires_grad_(False)
             autoencoder.eval()
-            if self.configs.autoencoder.use_fp16:
-                self.autoencoder = autoencoder.half().cuda()
-            else:
-                self.autoencoder = autoencoder.cuda()
+            if self.configs.train.compile.flag:
+                if self.rank == 0:
+                    self.logger.info("Begin compiling autoencoder model...")
+                autoencoder = torch.compile(autoencoder, mode=self.configs.train.compile.mode)
+                if self.rank == 0:
+                    self.logger.info("Compiling Done")
+            self.autoencoder = autoencoder
         else:
             self.autoencoder = None
 
         # LPIPS metric
-        if self.rank == 0:
-            self.lpips_loss = lpips.LPIPS(net='vgg').cuda()
+        lpips_loss = lpips.LPIPS(net='vgg').to(f"cuda:{self.rank}")
+        for params in lpips_loss.parameters():
+            params.requires_grad_(False)
+        lpips_loss.eval()
+        if self.configs.train.compile.flag:
+            if self.rank == 0:
+                self.logger.info("Begin compiling LPIPS Metric...")
+            lpips_loss = torch.compile(lpips_loss, mode=self.configs.train.compile.mode)
+            if self.rank == 0:
+                self.logger.info("Compiling Done")
+        self.lpips_loss = lpips_loss
 
         params = self.configs.diffusion.get('params', dict)
         self.base_diffusion = util_common.get_obj_from_str(self.configs.diffusion.target)(**params)
-
-        # model information
-        self.print_model_info()
 
     @torch.no_grad()
     def _dequeue_and_enqueue(self):
@@ -585,18 +686,41 @@ class TrainerDifIR(TrainerBase):
             self.lq = self.lq.contiguous()  # for the warning: grad and param do not obey the gradient layout contract
 
             return {'lq':self.lq, 'gt':self.gt}
+        elif phase == 'val':
+            offset = self.configs.train.get('val_resolution', 256)
+            for key, value in data.items():
+                h, w = value.shape[2:]
+                if h > offset and w > offset:
+                    h_end = int((h // offset) * offset)
+                    w_end = int((w // offset) * offset)
+                    data[key] = value[:, :, :h_end, :w_end]
+                else:
+                    h_pad = math.ceil(h / offset) * offset - h
+                    w_pad = math.ceil(w / offset) * offset - w
+                    padding_mode = self.configs.train.get('val_padding_mode', 'reflect')
+                    data[key] = F.pad(value, pad=(0, w_pad, 0, h_pad), mode=padding_mode)
+            return {key:value.cuda().to(dtype=dtype) for key, value in data.items()}
         else:
             return {key:value.cuda().to(dtype=dtype) for key, value in data.items()}
+
+    def backward_step(self, dif_loss_wrapper, micro_data, num_grad_accumulate, tt):
+        context = torch.cuda.amp.autocast if self.configs.train.use_amp else nullcontext
+        with context():
+            losses, z_t, z0_pred = dif_loss_wrapper()
+            losses['loss'] = losses['mse']
+            loss = losses['loss'].mean() / num_grad_accumulate
+        if self.amp_scaler is None:
+            loss.backward()
+        else:
+            self.amp_scaler.scale(loss).backward()
+
+        return losses, z0_pred, z_t
 
     def training_step(self, data):
         current_batchsize = data['gt'].shape[0]
         micro_batchsize = self.configs.train.microbatch
         num_grad_accumulate = math.ceil(current_batchsize / micro_batchsize)
 
-        if self.configs.train.use_fp16:
-            scaler = amp.GradScaler()
-
-        self.optimizer.zero_grad()
         for jj in range(0, current_batchsize, micro_batchsize):
             micro_data = {key:value[jj:jj+micro_batchsize,] for key, value in data.items()}
             last_batch = (jj+micro_batchsize >= current_batchsize)
@@ -607,11 +731,20 @@ class TrainerDifIR(TrainerBase):
                     )
             latent_downsamping_sf = 2**(len(self.configs.autoencoder.params.ddconfig.ch_mult) - 1)
             latent_resolution = micro_data['gt'].shape[-1] // latent_downsamping_sf
+            if 'autoencoder' in self.configs:
+                noise_chn = self.configs.autoencoder.params.embed_dim
+            else:
+                noise_chn = micro_data['gt'].shape[1]
             noise = torch.randn(
-                    size=micro_data['gt'].shape[:2] + (latent_resolution, ) * 2,
+                    size= (micro_data['gt'].shape[0], noise_chn,) + (latent_resolution, ) * 2,
                     device=micro_data['gt'].device,
                     )
-            model_kwargs={'lq':micro_data['lq'],} if self.configs.model.params.cond_lq else None
+            if self.configs.model.params.cond_lq:
+                model_kwargs = {'lq':micro_data['lq'],}
+                if 'mask' in micro_data:
+                    model_kwargs['mask'] = micro_data['mask']
+            else:
+                model_kwargs = None
             compute_losses = functools.partial(
                 self.base_diffusion.training_losses,
                 self.model,
@@ -622,50 +755,40 @@ class TrainerDifIR(TrainerBase):
                 model_kwargs=model_kwargs,
                 noise=noise,
             )
-            if self.configs.train.use_fp16:
-                with amp.autocast():
-                    if last_batch or self.num_gpus <= 1:
-                        losses, z_t, z0_pred = compute_losses()
-                    else:
-                        with self.model.no_sync():
-                            losses, z_t, z0_pred = compute_losses()
-                    loss = losses["loss"].mean() / num_grad_accumulate
-                scaler.scale(loss).backward()
+            if last_batch or self.num_gpus <= 1:
+                losses, z0_pred, z_t = self.backward_step(compute_losses, micro_data, num_grad_accumulate, tt)
             else:
-                if last_batch or self.num_gpus <= 1:
-                    losses, z_t, z0_pred = compute_losses()
-                else:
-                    with self.model.no_sync():
-                        losses, z_t, z0_pred = compute_losses()
-                loss = losses["loss"].mean() / num_grad_accumulate
-                loss.backward()
+                with self.model.no_sync():
+                    losses, z0_pred, z_t = self.backward_step(compute_losses, micro_data, num_grad_accumulate, tt)
 
             # make logging
-            self.log_step_train(losses, tt, micro_data, z_t, z0_pred, last_batch)
+            if last_batch:
+                self.log_step_train(losses, tt, micro_data, z_t, z0_pred.detach())
 
-        if self.configs.train.use_fp16:
-            scaler.step(self.optimizer)
-            scaler.update()
+        if self.configs.train.use_amp:
+            self.amp_scaler.step(self.optimizer)
+            self.amp_scaler.update()
         else:
             self.optimizer.step()
 
-        self.update_ema_model()
+        # grad zero
+        self.model.zero_grad()
+
+        if hasattr(self.configs.train, 'ema_rate'):
+            self.update_ema_model()
 
     def adjust_lr(self, current_iters=None):
-        if len(self.configs.train.milestones) > 0:
-            base_lr = self.configs.train.lr
-            linear_steps = self.configs.train.milestones[0]
-            current_iters = self.current_iters if current_iters is None else current_iters
-            if current_iters <= linear_steps:
-                for params_group in self.optimizer.param_groups:
-                    params_group['lr'] = (current_iters / linear_steps) * base_lr
-            elif current_iters in self.configs.train.milestones:
-                for params_group in self.optimizer.param_groups:
-                    params_group['lr'] *= 0.5
+        base_lr = self.configs.train.lr
+        warmup_steps = self.configs.train.warmup_iterations
+        current_iters = self.current_iters if current_iters is None else current_iters
+        if current_iters <= warmup_steps:
+            for params_group in self.optimizer.param_groups:
+                params_group['lr'] = (current_iters / warmup_steps) * base_lr
         else:
-            pass
+            if hasattr(self, 'lr_scheduler'):
+                self.lr_scheduler.step()
 
-    def log_step_train(self, loss, tt, batch, z_t, z0_pred, flag=False, phase='train'):
+    def log_step_train(self, loss, tt, batch, z_t, z0_pred, phase='train'):
         '''
         param loss: a dict recording the loss informations
         param tt: 1-D tensor, time steps
@@ -673,12 +796,11 @@ class TrainerDifIR(TrainerBase):
         if self.rank == 0:
             chn = batch['gt'].shape[1]
             num_timesteps = self.base_diffusion.num_timesteps
-            record_steps = [1, num_timesteps //2, num_timesteps]
+            record_steps = [1, (num_timesteps // 2) + 1, num_timesteps]
             if self.current_iters % self.configs.train.log_freq[0] == 1:
                 self.loss_mean = {key:torch.zeros(size=(len(record_steps),), dtype=torch.float64)
                                   for key in loss.keys()}
                 self.loss_count = torch.zeros(size=(len(record_steps),), dtype=torch.float64)
-            
             for jj in range(len(record_steps)):
                 for key, value in loss.items():
                     index = record_steps[jj] - 1
@@ -687,7 +809,7 @@ class TrainerDifIR(TrainerBase):
                     self.loss_mean[key][jj] += current_loss.item()
                 self.loss_count[jj] += mask.sum().item()
 
-            if self.current_iters % self.configs.train.log_freq[0] == 0 and flag:
+            if self.current_iters % self.configs.train.log_freq[0] == 0:
                 if torch.any(self.loss_count == 0):
                     self.loss_count += 1e-4
                 for key in loss.keys():
@@ -696,62 +818,33 @@ class TrainerDifIR(TrainerBase):
                         self.current_iters,
                         self.configs.train.iterations)
                 for jj, current_record in enumerate(record_steps):
-                    log_str += 't({:d}):{:.2e}/{:.2e}, '.format(
+                    log_str += 't({:d}):{:.1e}/{:.1e}, '.format(
                             current_record,
                             self.loss_mean['loss'][jj].item(),
                             self.loss_mean['mse'][jj].item(),
                             )
-                    # tensorboard
-                    # self.writer.add_scalar(f'Loss-Step-{current_record}',
-                                           # self.loss_mean['loss'][jj].item(),
-                                           # self.log_step[phase])
                 log_str += 'lr:{:.2e}'.format(self.optimizer.param_groups[0]['lr'])
                 self.logger.info(log_str)
-                self.log_step[phase] += 1
-            if self.current_iters % self.configs.train.log_freq[1] == 0 and flag:
-                x1 = vutils.make_grid(batch['lq'], normalize=True, scale_each=True)  # c x h x w
-                # self.writer.add_image("Training LQ Image", x1, self.log_step_img[phase])
-                if self.configs.train.save_images:
-                    util_image.imwrite(
-                           x1.cpu().permute(1,2,0).numpy(),
-                           self.image_dir / phase / f"lq_{self.log_step_img[phase]:05d}.png",
-                           )
-                x2 = vutils.make_grid(batch['gt'], normalize=True)
-                # self.writer.add_image("Training HQ Image", x2, self.log_step_img[phase])
-                if self.configs.train.save_images:
-                    util_image.imwrite(
-                           x2.cpu().permute(1,2,0).numpy(),
-                           self.image_dir / phase / f"hq_{self.log_step_img[phase]:05d}.png",
-                           )
+                self.logging_metric(self.loss_mean, tag='Loss', phase=phase, add_global_step=True)
+            if self.current_iters % self.configs.train.log_freq[1] == 0:
+                self.logging_image(batch['lq'], tag='lq', phase=phase, add_global_step=False)
+                self.logging_image(batch['gt'], tag='gt', phase=phase, add_global_step=False)
                 x_t = self.base_diffusion.decode_first_stage(
                         self.base_diffusion._scale_input(z_t, tt),
                         self.autoencoder,
                         )
-                x3 = vutils.make_grid(x_t, normalize=True, scale_each=True)
-                # self.writer.add_image("Training Diffused Image", x3, self.log_step_img[phase])
-                if self.configs.train.save_images:
-                    util_image.imwrite(
-                           x3.cpu().permute(1,2,0).numpy(),
-                           self.image_dir / phase / f"diffused_{self.log_step_img[phase]:05d}.png",
-                           )
+                self.logging_image(x_t, tag='diffused', phase=phase, add_global_step=False)
                 x0_pred = self.base_diffusion.decode_first_stage(
-                        self.base_diffusion._scale_input(z0_pred, tt),
+                        z0_pred,
                         self.autoencoder,
                         )
-                x4 = vutils.make_grid(x0_pred, normalize=True, scale_each=True)
-                # self.writer.add_image("Training Predicted Image", x4, self.log_step_img[phase])
-                if self.configs.train.save_images:
-                    util_image.imwrite(
-                           x4.cpu().permute(1,2,0).numpy(),
-                           self.image_dir / phase / f"x0_pred_{self.log_step_img[phase]:05d}.png",
-                           )
-                self.log_step_img[phase] += 1
+                self.logging_image(x0_pred, tag='x0-pred', phase=phase, add_global_step=True)
 
-            if self.current_iters % self.configs.train.save_freq == 1 and flag:
+            if self.current_iters % self.configs.train.save_freq == 1:
                 self.tic = time.time()
-            if self.current_iters % self.configs.train.save_freq == 0 and flag:
+            if self.current_iters % self.configs.train.save_freq == 0:
                 self.toc = time.time()
-                elaplsed = (self.toc - self.tic) * num_timesteps  / (num_timesteps - 1)
+                elaplsed = (self.toc - self.tic)
                 self.logger.info(f"Elapsed time: {elaplsed:.2f}s")
                 self.logger.info("="*100)
 
@@ -763,7 +856,15 @@ class TrainerDifIR(TrainerBase):
             else:
                 self.model.eval()
 
-            indices = [int(self.base_diffusion.num_timesteps * x) for x in [0.25, 0.5, 0.75, 1]]
+            indices = np.linspace(
+                    0,
+                    self.base_diffusion.num_timesteps,
+                    self.base_diffusion.num_timesteps if self.base_diffusion.num_timesteps < 5 else 4,
+                    endpoint=False,
+                    dtype=np.int64,
+                    ).tolist()
+            if not (self.base_diffusion.num_timesteps-1) in indices:
+                indices.append(self.base_diffusion.num_timesteps-1)
             batch_size = self.configs.train.batch[1]
             num_iters_epoch = math.ceil(len(self.datasets[phase]) / batch_size)
             mean_psnr = mean_lpips = 0
@@ -774,7 +875,12 @@ class TrainerDifIR(TrainerBase):
                 else:
                     im_lq = data['lq']
                 num_iters = 0
-                model_kwargs={'lq':im_lq,} if self.configs.model.params.cond_lq else None
+                if self.configs.model.params.cond_lq:
+                    model_kwargs = {'lq':data['lq'],}
+                    if 'mask' in data:
+                        model_kwargs['mask'] = data['mask']
+                else:
+                    model_kwargs = None
                 tt = torch.tensor(
                         [self.base_diffusion.num_timesteps, ]*im_lq.shape[0],
                         dtype=torch.int64,
@@ -790,83 +896,153 @@ class TrainerDifIR(TrainerBase):
                         progress=False,
                         ):
                     sample_decode = {}
-                    if (num_iters + 1) in indices or num_iters + 1 == 1:
+                    if num_iters in indices:
                         for key, value in sample.items():
-                            # if key in ['sample', 'pred_xstart']:
                             if key in ['sample', ]:
                                 sample_decode[key] = self.base_diffusion.decode_first_stage(
-                                        self.base_diffusion._scale_input(value, tt-1),
+                                        value,
                                         self.autoencoder,
-                                        )
+                                        ).clamp(-1.0, 1.0)
                         im_sr_progress = sample_decode['sample']
-                        # im_xstart = sample_decode['pred_xstart']
                         if num_iters + 1 == 1:
-                            # im_sr_all, im_xstart_all = im_sr_progress, im_xstart
                             im_sr_all = im_sr_progress
                         else:
                             im_sr_all = torch.cat((im_sr_all, im_sr_progress), dim=1)
-                            # im_xstart_all = torch.cat((im_xstart_all, im_xstart), dim=1)
                     num_iters += 1
                     tt -= 1
 
                 if 'gt' in data:
                     mean_psnr += util_image.batch_PSNR(
-                            sample_decode['sample'].detach() * 0.5 + 0.5,
+                            sample_decode['sample'] * 0.5 + 0.5,
                             im_gt * 0.5 + 0.5,
-                            ycbcr=True,
+                            ycbcr=self.configs.train.val_y_channel,
                             )
-                    mean_lpips += self.lpips_loss(sample_decode['sample'].detach(), im_gt).sum().item()
+                    mean_lpips += self.lpips_loss(
+                            sample_decode['sample'],
+                            im_gt,
+                            ).sum().item()
 
                 if (ii + 1) % self.configs.train.log_freq[2] == 0:
                     self.logger.info(f'Validation: {ii+1:02d}/{num_iters_epoch:02d}...')
 
                     im_sr_all = rearrange(im_sr_all, 'b (k c) h w -> (b k) c h w', c=im_lq.shape[1])
-                    x1 = vutils.make_grid(im_sr_all.detach(), nrow=len(indices)+1, normalize=True, scale_each=True)
-                    # self.writer.add_image('Validation Sample Progress', x1, self.log_step_img[phase])
-                    if self.configs.train.save_images:
-                        util_image.imwrite(
-                               x1.cpu().permute(1,2,0).numpy(),
-                               self.image_dir / phase / f"progress_{self.log_step_img[phase]:05d}.png",
-                               )
-                    x3 = vutils.make_grid(im_lq, normalize=True)
-                    # self.writer.add_image('Validation LQ Image', x3, self.log_step_img[phase])
-                    if self.configs.train.save_images:
-                        util_image.imwrite(
-                               x3.cpu().permute(1,2,0).numpy(),
-                               self.image_dir / phase / f"lq_{self.log_step_img[phase]:05d}.png",
-                               )
+                    self.logging_image(
+                            im_sr_all,
+                            tag='progress',
+                            phase=phase,
+                            add_global_step=False,
+                            nrow=len(indices),
+                            )
                     if 'gt' in data:
-                        x4 = vutils.make_grid(im_gt, normalize=True)
-                        # self.writer.add_image('Validation HQ Image', x4, self.log_step_img[phase])
-                        if self.configs.train.save_images:
-                            util_image.imwrite(
-                                   x4.cpu().permute(1,2,0).numpy(),
-                                   self.image_dir / phase / f"hq_{self.log_step_img[phase]:05d}.png",
-                                   )
-                    self.log_step_img[phase] += 1
+                        self.logging_image(im_gt, tag='gt', phase=phase, add_global_step=False)
+                    self.logging_image(im_lq, tag='lq', phase=phase, add_global_step=True)
 
             if 'gt' in data:
                 mean_psnr /= len(self.datasets[phase])
                 mean_lpips /= len(self.datasets[phase])
                 self.logger.info(f'Validation Metric: PSNR={mean_psnr:5.2f}, LPIPS={mean_lpips:6.4f}...')
-                # self.writer.add_scalar('Validation PSNR', mean_psnr, self.log_step[phase])
-                # self.writer.add_scalar('Validation LPIPS', mean_lpips, self.log_step[phase])
-                self.log_step[phase] += 1
+                self.logging_metric(mean_psnr, tag='PSNR', phase=phase, add_global_step=False)
+                self.logging_metric(mean_lpips, tag='LPIPS', phase=phase, add_global_step=True)
 
             self.logger.info("="*100)
 
-            if not self.configs.train.use_ema_val:
+            if not (self.configs.train.use_ema_val and hasattr(self.configs.train, 'ema_rate')):
                 self.model.train()
 
-    def update_ema_model(self):
-        if self.num_gpus > 1:
-            dist.barrier()
+class TrainerDifIRLPIPS(TrainerDifIR):
+    def backward_step(self, dif_loss_wrapper, micro_data, num_grad_accumulate, tt):
+        loss_coef = self.configs.train.get('loss_coef')
+        context = torch.cuda.amp.autocast if self.configs.train.use_amp else nullcontext
+        # diffusion loss
+        with context():
+            losses, z_t, z0_pred = dif_loss_wrapper()
+            x0_pred = self.base_diffusion.decode_first_stage(
+                    z0_pred,
+                    self.autoencoder,
+                    ) # f16
+            self.current_x0_pred = x0_pred.detach()
+
+            # classification loss
+            losses["lpips"] = self.lpips_loss(
+                    x0_pred.clamp(-1.0, 1.0),
+                    micro_data['gt'],
+                    ).to(z0_pred.dtype).view(-1)
+            flag_nan = torch.any(torch.isnan(losses["lpips"]))
+            if flag_nan:
+                losses["lpips"] = torch.nan_to_num(losses["lpips"], nan=0.0)
+
+            losses["mse"] *= loss_coef[0]
+            losses["lpips"] *= loss_coef[1]
+
+            assert losses["mse"].shape == losses["lpips"].shape
+            if flag_nan:
+                losses["loss"] = losses["mse"]
+            else:
+                losses["loss"] = losses["mse"] + losses["lpips"]
+            loss = losses['loss'].mean() / num_grad_accumulate
+        if self.amp_scaler is None:
+            loss.backward()
+        else:
+            self.amp_scaler.scale(loss).backward()
+
+        return losses, z0_pred, z_t
+
+    def log_step_train(self, loss, tt, batch, z_t, z0_pred, phase='train'):
+        '''
+        param loss: a dict recording the loss informations
+        param tt: 1-D tensor, time steps
+        '''
         if self.rank == 0:
-            source_state = self.model.state_dict()
-            rate = self.ema_rate
-            for key, value in self.ema_state.items():
-                if not 'relative_position_index' in key:
-                    self.ema_state[key].mul_(rate).add_(source_state[key].detach().data, alpha=1-rate)
+            chn = batch['gt'].shape[1]
+            num_timesteps = self.base_diffusion.num_timesteps
+            record_steps = [1, (num_timesteps // 2) + 1, num_timesteps]
+            if self.current_iters % self.configs.train.log_freq[0] == 1:
+                self.loss_mean = {key:torch.zeros(size=(len(record_steps),), dtype=torch.float64)
+                                  for key in loss.keys()}
+                self.loss_count = torch.zeros(size=(len(record_steps),), dtype=torch.float64)
+            for jj in range(len(record_steps)):
+                for key, value in loss.items():
+                    index = record_steps[jj] - 1
+                    mask = torch.where(tt == index, torch.ones_like(tt), torch.zeros_like(tt))
+                    assert value.shape == mask.shape
+                    current_loss = torch.sum(value.detach() * mask)
+                    self.loss_mean[key][jj] += current_loss.item()
+                self.loss_count[jj] += mask.sum().item()
+
+            if self.current_iters % self.configs.train.log_freq[0] == 0:
+                if torch.any(self.loss_count == 0):
+                    self.loss_count += 1e-4
+                for key in loss.keys():
+                    self.loss_mean[key] /= self.loss_count
+                log_str = 'Train: {:06d}/{:06d}, MSE/LPIPS: '.format(
+                        self.current_iters,
+                        self.configs.train.iterations)
+                for jj, current_record in enumerate(record_steps):
+                    log_str += 't({:d}):{:.1e}/{:.1e}, '.format(
+                            current_record,
+                            self.loss_mean['mse'][jj].item(),
+                            self.loss_mean['lpips'][jj].item(),
+                            )
+                log_str += 'lr:{:.2e}'.format(self.optimizer.param_groups[0]['lr'])
+                self.logger.info(log_str)
+                self.logging_metric(self.loss_mean, tag='Loss', phase=phase, add_global_step=True)
+            if self.current_iters % self.configs.train.log_freq[1] == 0:
+                self.logging_image(batch['lq'], tag='lq', phase=phase, add_global_step=False)
+                self.logging_image(batch['gt'], tag='gt', phase=phase, add_global_step=False)
+                x_t = self.base_diffusion.decode_first_stage(
+                        self.base_diffusion._scale_input(z_t, tt),
+                        self.autoencoder,
+                        )
+                self.logging_image(x_t, tag='diffused', phase=phase, add_global_step=False)
+                self.logging_image(self.current_x0_pred, tag='x0-pred', phase=phase, add_global_step=True)
+
+            if self.current_iters % self.configs.train.save_freq == 1:
+                self.tic = time.time()
+            if self.current_iters % self.configs.train.save_freq == 0:
+                self.toc = time.time()
+                elaplsed = (self.toc - self.tic)
+                self.logger.info(f"Elapsed time: {elaplsed:.2f}s")
+                self.logger.info("="*100)
 
 def replace_nan_in_batch(im_lq, im_gt):
     '''
