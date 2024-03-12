@@ -31,6 +31,12 @@
 A suitable [conda](https://conda.io/) environment named `resshift` can be created and activated with:
 
 ```
+conda env create -n resshift python=3.10
+conda activate resshift
+pip install -r requirements.txt
+```
+or
+```
 conda env create -f environment.yml
 conda activate resshift
 ```
