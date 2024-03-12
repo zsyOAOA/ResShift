@@ -92,8 +92,8 @@ def batch_PSNR(img, imclean, border=0, ycbcr=False):
     if ycbcr:
         img = rgb2ycbcrTorch(img, True)
         imclean = rgb2ycbcrTorch(imclean, True)
-    Img = img.data.cpu().numpy()
-    Iclean = imclean.data.cpu().numpy()
+    Img = img.data.cpu().numpy().clip(min=0., max=1.)
+    Iclean = imclean.data.cpu().numpy().clip(min=0., max=1.)
     Img = img_as_ubyte(Img)
     Iclean = img_as_ubyte(Iclean)
     PSNR = 0
@@ -272,7 +272,7 @@ def tensor2img(tensor, rgb2bgr=True, out_type=np.uint8, min_max=(0, 1)):
         result = result[0]
     return result
 
-def img2tensor(imgs, out_type=torch.float32):
+def img2tensor(imgs, bgr2rgb=False, out_type=torch.float32):
     """Convert image numpy arrays into torch tensor.
     Args:
         imgs (Array or list[array]): Accept shapes:
@@ -289,6 +289,8 @@ def img2tensor(imgs, out_type=torch.float32):
         if img.ndim == 2:
             tensor = torch.from_numpy(img[None, None,]).type(out_type)
         elif img.ndim == 3:
+            if bgr2rgb:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             tensor = torch.from_numpy(rearrange(img, 'h w c -> c h w')).type(out_type).unsqueeze(0)
         else:
             raise TypeError(f'2D or 3D numpy array expected, got{img.ndim}D array')
@@ -444,24 +446,39 @@ def cubic(x):
         (-0.5*absx3 + 2.5*absx2 - 4*absx + 2) * (((absx > 1)*(absx <= 2)).type_as(absx))
 
 # ------------------------Image I/O-----------------------------
-def imread(path, chn='rgb', dtype='float32'):
+def imread(path, chn='rgb', dtype='float32', force_gray2rgb=True, force_rgba2rgb=False):
     '''
     Read image.
     chn: 'rgb', 'bgr' or 'gray'
     out:
         im: h x w x c, numpy tensor
     '''
-    im = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)  # BGR, uint8
     try:
-        if chn.lower() == 'rgb':
-            if im.ndim == 3:
-                im = bgr2rgb(im)
-            else:
-                im = np.stack((im, im, im), axis=2)
-        elif chn.lower() == 'gray':
-            assert im.ndim == 2
+        im = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)  # BGR, uint8
     except:
         print(str(path))
+
+    if im is None:
+        print(str(path))
+
+    if chn.lower() == 'gray':
+        assert im.ndim == 2, f"{str(path)} has {im.ndim} channels!"
+    else:
+        if im.ndim == 2:
+            if force_gray2rgb:
+                im = np.stack([im, im, im], axis=2)
+            else:
+                raise ValueError(f"{str(path)} has {im.ndim} channels!")
+        elif im.ndim == 4:
+            if force_rgba2rgb:
+                im = im[:, :, :3]
+            else:
+                raise ValueError(f"{str(path)} has {im.ndim} channels!")
+        else:
+            if chn.lower() == 'rgb':
+                im = bgr2rgb(im)
+            elif chn.lower() == 'bgr':
+                pass
 
     if dtype == 'float32':
         im = im.astype(np.float32) / 255.
@@ -599,17 +616,6 @@ def inverse_data_aug_np(image, mode):
 
     return out
 
-class SpatialAug:
-    def __init__(self):
-        pass
-
-    def __call__(self, im, flag=None):
-        if flag is None:
-            flag = random.randint(0, 7)
-
-        out = data_aug_np(im, flag)
-        return out
-
 # ----------------------Visualization----------------------------
 def imshow(x, title=None, cbar=False):
     import matplotlib.pyplot as plt
@@ -619,6 +625,29 @@ def imshow(x, title=None, cbar=False):
     if cbar:
         plt.colorbar()
     plt.show()
+
+def imblend_with_mask(im, mask, alpha=0.25):
+    """
+    Input:
+        im, mask: h x w x c numpy array, uint8, [0, 255]
+        alpha: scaler in [0.0, 1.0]
+    """
+    edge_map = cv2.Canny(mask, 100, 200).astype(np.float32)[:, :, None] / 255.
+
+    assert mask.dtype == np.uint8
+    mask = mask.astype(np.float32) / 255.
+    if mask.ndim == 2:
+        mask = mask[:, :, None]
+
+    back_color = np.array([159, 121, 238], dtype=np.float32).reshape((1,1,3))
+    blend = im.astype(np.float32) * alpha + (1 - alpha) * back_color
+    blend = np.clip(blend, 0, 255)
+    out = im.astype(np.float32) * (1 - mask) + blend * mask
+
+    # paste edge
+    out = out * (1 - edge_map) + np.array([0,255,0], dtype=np.float32).reshape((1,1,3)) * edge_map
+
+    return out.astype(np.uint8)
 
 # -----------------------Covolution------------------------------
 def imgrad(im, pading_mode='mirror'):
@@ -724,22 +753,61 @@ def random_crop(im, pch_size):
     Randomly crop a patch from the give image.
     '''
     h, w = im.shape[:2]
-    if h == pch_size and w == pch_size:
-        im_pch = im
-    else:
-        assert h >= pch_size or w >= pch_size
+    # padding if necessary
+    if h < pch_size or w < pch_size:
+        pad_h = min(max(0, pch_size - h), h)
+        pad_w = min(max(0, pch_size - w), w)
+        im = cv2.copyMakeBorder(im, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
+
+    h, w = im.shape[:2]
+    if h == pch_size:
+        ind_h = 0
+    elif h > pch_size:
         ind_h = random.randint(0, h-pch_size)
+    else:
+        raise ValueError('Image height is smaller than the patch size')
+    if w == pch_size:
+        ind_w = 0
+    elif w > pch_size:
         ind_w = random.randint(0, w-pch_size)
-        im_pch = im[ind_h:ind_h+pch_size, ind_w:ind_w+pch_size,]
+    else:
+        raise ValueError('Image width is smaller than the patch size')
+
+    im_pch = im[ind_h:ind_h+pch_size, ind_w:ind_w+pch_size,]
 
     return im_pch
 
-class RandomCrop:
-    def __init__(self, pch_size):
-        self.pch_size = pch_size
+class ToTensor:
+    def __init__(self, max_value=1.0):
+        self.max_value = max_value
 
     def __call__(self, im):
-        return random_crop(im, self.pch_size)
+        assert isinstance(im, np.ndarray)
+        if im.ndim == 2:
+            im = im[:, :, np.newaxis]
+        if im.dtype == np.uint8:
+            assert self.max_value == 255.
+            out = torch.from_numpy(im.astype(np.float32).transpose(2,0,1) / self.max_value)
+        else:
+            assert self.max_value == 1.0
+            out = torch.from_numpy(im.transpose(2,0,1))
+        return out
+
+class RandomCrop:
+    def __init__(self, pch_size, pass_crop=False):
+        self.pch_size = pch_size
+        self.pass_crop = pass_crop
+
+    def __call__(self, im):
+        if self.pass_crop:
+            return im
+        if isinstance(im, list) or isinstance(im, tuple):
+            out = []
+            for current_im in im:
+                out.append(random_crop(current_im, self.pch_size))
+        else:
+            out = random_crop(im, self.pch_size)
+        return out
 
 class ImageSpliterNp:
     def __init__(self, im, pch_size, stride, sf=1):
@@ -910,7 +978,7 @@ class ImageSpliterTh:
         assert torch.all(self.pixel_count != 0)
         return self.im_res.div(self.pixel_count)
 
-# ----------------------Patch Cropping----------------------------
+# ----------------------Patch Cliping----------------------------
 class Clamper:
     def __init__(self, min_max=(-1, 1)):
         self.min_bound, self.max_bound = min_max[0], min_max[1]
@@ -922,6 +990,83 @@ class Clamper:
             return torch.clamp(im, min=self.min_bound, max=self.max_bound)
         else:
             raise TypeError(f'ndarray or Tensor expected, got {type(im)}')
+
+# ----------------------Interpolation----------------------------
+class Bicubic:
+    def __init__(self, scale=None, out_shape=None, activate_matlab=True, resize_back=False):
+        self.scale = scale
+        self.activate_matlab = activate_matlab
+        self.out_shape = out_shape
+        self.resize_back = resize_back
+
+    def __call__(self, im):
+        if self.activate_matlab:
+            out = imresize_np(im, scale=self.scale)
+            if self.resize_back:
+                out = imresize_np(out, scale=1/self.scale)
+        else:
+            out = cv2.resize(
+                    im,
+                    dsize=self.out_shape,
+                    fx=self.scale,
+                    fy=self.scale,
+                    interpolation=cv2.INTER_CUBIC,
+                    )
+            if self.resize_back:
+                out = cv2.resize(
+                        out,
+                        dsize=self.out_shape,
+                        fx=1/self.scale,
+                        fy=1/self.scale,
+                        interpolation=cv2.INTER_CUBIC,
+                        )
+        return out
+
+class SmallestMaxSize:
+    def __init__(self, max_size=256, interpolation=None, pass_smallmaxresize=False):
+        from albumentations import SmallestMaxSize
+        self.resizer = SmallestMaxSize(
+                max_size=max_size,
+                interpolation=cv2.INTER_CUBIC if interpolation is None else interpolation
+                )
+        self.pass_smallmaxresize = pass_smallmaxresize
+
+    def __call__(self, im):
+        if self.pass_smallmaxresize:
+            out = im
+        else:
+            out = self.resizer(image=im)['image']
+        return out
+
+# ----------------------augmentation----------------------------
+class SpatialAug:
+    def __init__(self, pass_aug, only_hflip=False, only_vflip=False, only_hvflip=False):
+        self.only_hflip = only_hflip
+        self.only_vflip = only_vflip
+        self.only_hvflip = only_hvflip
+        self.pass_aug = pass_aug
+
+    def __call__(self, im, flag=None):
+        if self.pass_aug:
+            return im
+
+        if flag is None:
+            if self.only_hflip:
+                flag = random.choice([0, 5])
+            elif self.only_vflip:
+                flag = random.choice([0, 1])
+            elif self.only_hvflip:
+                flag = random.choice([0, 1, 5])
+            else:
+                flag = random.randint(0, 7)
+
+        if isinstance(im, list) or isinstance(im, tuple):
+            out = []
+            for current_im in im:
+                out.append(data_aug_np(current_im, flag))
+        else:
+            out = data_aug_np(im, flag)
+        return out
 
 if __name__ == '__main__':
     im = np.random.randn(64, 64, 3).astype(np.float32)

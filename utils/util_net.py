@@ -5,6 +5,7 @@
 import math
 import torch
 from pathlib import Path
+from copy import deepcopy
 from collections import OrderedDict
 import torch.nn.functional as F
 
@@ -83,14 +84,15 @@ def measure_time(net, inputs, num_forward=100):
     return start.elapsed_time(end) / 1000
 
 def reload_model(model, ckpt):
-    if list(model.state_dict().keys())[0].startswith('module.'):
-        if list(ckpt.keys())[0].startswith('module.'):
-            ckpt = ckpt
-        else:
-            ckpt = OrderedDict({f'module.{key}':value for key, value in ckpt.items()})
-    else:
-        if list(ckpt.keys())[0].startswith('module.'):
-            ckpt = OrderedDict({key[7:]:value for key, value in ckpt.items()})
-        else:
-            ckpt = ckpt
-    model.load_state_dict(ckpt)
+    module_flag = list(ckpt.keys())[0].startswith('module.')
+    compile_flag = '_orig_mod' in list(ckpt.keys())[0]
+
+    for source_key, source_value in model.state_dict().items():
+        target_key = source_key
+        if compile_flag and (not '_orig_mod.' in source_key):
+            target_key = '_orig_mod.' + target_key
+        if module_flag and (not source_key.startswith('module')):
+            target_key = 'module.' + target_key
+
+        assert target_key in ckpt
+        source_value.copy_(ckpt[target_key])

@@ -1,14 +1,38 @@
 trainer:
-  target: trainer.TrainerDifIR
+  target: trainer.TrainerDifIRLPIPS
+
+autoencoder:
+  target: ldm.models.autoencoder.VQModelTorch
+  ckpt_path: weights/autoencoder_vq_f4.pth
+  use_fp16: True
+  params:
+    embed_dim: 3
+    n_embed: 8192
+    ddconfig:
+      double_z: False
+      z_channels: 3
+      resolution: 256
+      in_channels: 3
+      out_ch: 3
+      ch: 128
+      ch_mult:
+      - 1
+      - 2
+      - 4
+      num_res_blocks: 2
+      attn_resolutions: []
+      dropout: 0.0
+      padding_mode: zeros
 
 model:
   target: models.unet.UNetModelSwin
+  #ckpt_path: /mnt/lustre/zsyue/projects/ResShift/SR/models/swin_v2/Esr256_ImageNet_rescale/S5_K2.0_P0.3/ema_ckpts/ema_model_300000.pth
   ckpt_path: ~
   params:
     image_size: 64
     in_channels: 3
     model_channels: 160
-    out_channels: 3
+    out_channels: ${autoencoder.params.embed_dim}
     attention_resolutions: [64,32,16,8]
     dropout: 0
     channel_mult: [1, 2, 2, 4]
@@ -34,8 +58,8 @@ diffusion:
     schedule_kwargs:
       power: 0.3
     etas_end: 0.99
-    steps: 15
-    min_noise_level: 0.04
+    steps: 4
+    min_noise_level: 0.2
     kappa: 2.0
     weighted_mse: False
     predict_type: xstart
@@ -43,29 +67,6 @@ diffusion:
     scale_factor: 1.0
     normalize_input: True
     latent_flag: True
-
-autoencoder:
-  target: ldm.models.autoencoder.VQModelTorch
-  ckpt_path: weights/autoencoder_vq_f4.pth
-  use_fp16: True
-  params:
-    embed_dim: 3
-    n_embed: 8192
-    ddconfig:
-      double_z: False
-      z_channels: 3
-      resolution: 256
-      in_channels: 3
-      out_ch: 3
-      ch: 128
-      ch_mult:
-      - 1
-      - 2
-      - 4
-      num_res_blocks: 2
-      attn_resolutions: []
-      dropout: 0.0
-      padding_mode: zeros
 
 degradation:
   sf: 4
@@ -123,7 +124,7 @@ data:
 
       final_sinc_prob: 0.8
 
-      gt_size: 256
+      gt_size: ${degradation.gt_size}
       crop_pad_size: 300
       use_hflip: True
       use_rot: False
@@ -148,20 +149,21 @@ train:
   # learning rate
   lr: 5e-5                      # learning rate 
   lr_min: 2e-5                      # learning rate 
-  lr_schedule: ~
+  lr_schedule: cosin
   warmup_iterations: 5000
   # dataloader
-  batch: [64, 8]                
-  microbatch: 8
-  num_workers: 4
+  batch: [96, 8]                
+  microbatch: 12
+  num_workers: 6
   prefetch_factor: 2            
   # optimization settings
   weight_decay: 0               
   ema_rate: 0.999
-  iterations: 300000            # total iterations
+  iterations: 400000            # total iterations
   # save logging
-  save_freq: 10000              
+  save_freq: 10000
   log_freq: [200, 2000, 1]         # [training loss, training images, val images]
+  loss_coef: [1.0, 1.0]         # [mse, lpips]
   local_logging: True           # manually save images
   tf_logging: False             # tensorboard logging
   # validation settings

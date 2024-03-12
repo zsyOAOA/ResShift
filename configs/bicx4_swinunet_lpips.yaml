@@ -3,7 +3,7 @@ trainer:
 
 autoencoder:
   target: ldm.models.autoencoder.VQModelTorch
-  ckpt_path: weights/autoencoder_vq_f4.pth
+  ckpt_path: weights/autoencoder/autoencoder_vq_f4.pth
   use_fp16: True
   params:
     embed_dim: 3
@@ -31,7 +31,7 @@ model:
     image_size: 64
     in_channels: 3
     model_channels: 160
-    out_channels: ${autoencoder.params.embed_dim}
+    out_channels: 3
     attention_resolutions: [64,32,16,8]
     dropout: 0
     channel_mult: [1, 2, 2, 4]
@@ -47,12 +47,12 @@ model:
     window_size: 8
     mlp_ratio: 4
     cond_lq: True
-    lq_size: 128
+    lq_size: 64
 
 diffusion:
   target: models.script_util.create_gaussian_diffusion
   params:
-    sf: 2
+    sf: 4
     schedule_name: exponential
     schedule_kwargs:
       power: 0.3
@@ -67,67 +67,50 @@ diffusion:
     normalize_input: True
     latent_flag: True
 
-degradation:
-  sf: 2
-  # the first degradation process
-  resize_prob: [0.2, 0.7, 0.1]  # up, down, keep
-  resize_range: [0.15, 1.5]
-  gaussian_noise_prob: 0.5
-  noise_range: [1, 30]
-  poisson_scale_range: [0.05, 3.0]
-  gray_noise_prob: 0.4
-  jpeg_range: [30, 95]
-
-  # the second degradation process
-  second_order_prob: 0.5
-  second_blur_prob: 0.8
-  resize_prob2: [0.3, 0.4, 0.3]  # up, down, keep
-  resize_range2: [0.3, 1.2]
-  gaussian_noise_prob2: 0.5
-  noise_range2: [1, 25]
-  poisson_scale_range2: [0.05, 2.5]
-  gray_noise_prob2: 0.4
-  jpeg_range2: [30, 95]
-
-  gt_size: 256 
-  resize_back: False
-  use_sharp: False
-
 data:
   train:
-    type: realesrgan
+    type: bicubic
     params:
-      dir_paths: []
-      txt_file_path: [
-                      '/mnt/sfs-common/zsyue/database/ImageNet/files_txt/path_train_all.txt', 
-                      '/mnt/sfs-common/zsyue/database/FFHQ/files_txt/files256.txt',
-                     ] 
-      im_exts: ['JPEG', ]
-      io_backend:
-        type: disk
-      blur_kernel_size: 21
-      kernel_list: ['iso', 'aniso', 'generalized_iso', 'generalized_aniso', 'plateau_iso', 'plateau_aniso']
-      kernel_prob: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
-      sinc_prob: 0.1
-      blur_sigma: [0.2, 3.0]
-      betag_range: [0.5, 4.0]
-      betap_range: [1, 2.0]
-
-      blur_kernel_size2: 15
-      kernel_list2: ['iso', 'aniso', 'generalized_iso', 'generalized_aniso', 'plateau_iso', 'plateau_aniso']
-      kernel_prob2: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
-      sinc_prob2: 0.1
-      blur_sigma2: [0.2, 1.5]
-      betag_range2: [0.5, 4.0]
-      betap_range2: [1, 2.0]
-
-      final_sinc_prob: 0.8
-
-      gt_size: 256
-      crop_pad_size: 300
-      use_hflip: True
-      use_rot: False
-      rescale_gt: True
+      source_path: ~ 
+      source_txt_path: 
+        - /mnt/sfs-common/zsyue/database/ImageNet/files_txt/path_train_all.txt
+        - /mnt/sfs-common/zsyue/database/FFHQ/files_txt/files256.txt
+      degrade_kwargs:
+        scale: 0.25
+        activate_matlab: True
+        resize_back: False
+        pch_size: 256
+        pass_smallmaxresize: False
+        pass_aug: False
+        pass_crop: False
+      transform_type: default
+      transform_kwargs:
+        mean: 0.5
+        std: 0.5
+      length: ~
+      need_path: False
+      im_exts: JPEG
+      recursive: False
+  val:
+    type: bicubic
+    params:
+      source_path: /mnt/sfs-common/zsyue/projects/ResShift/SR/testingdata/imagenet256/gt
+      degrade_kwargs:
+        scale: 0.25
+        activate_matlab: True
+        resize_back: False
+        pch_size: 256
+        pass_smallmaxresize: True
+        pass_aug: True
+        pass_crop: True
+      transform_type: default
+      transform_kwargs:
+        mean: 0.5
+        std: 0.5
+      length: 64
+      need_path: False
+      im_exts: png
+      recursive: False
 
 train:
   # learning rate
@@ -145,8 +128,8 @@ train:
   ema_rate: 0.999
   iterations: 400000            # total iterations
   # save logging
-  save_freq: 10000
-  log_freq: [200, 2000, 1]         # [training loss, training images, val images]
+  save_freq: 10000              
+  log_freq: [1000, 2000, 1]         # [training loss, training images, val images]
   loss_coef: [1.0, 1.0]         # [mse, lpips]
   local_logging: True           # manually save images
   tf_logging: False             # tensorboard logging
@@ -162,5 +145,5 @@ train:
   global_seeding: False
   # model compile
   compile:
-    flag: False
+    flag: True
     mode: reduce-overhead      # default, reduce-overhead
