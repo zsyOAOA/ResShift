@@ -106,7 +106,21 @@ def _extract_into_tensor(arr, timesteps, broadcast_shape):
 
 class GaussianDiffusion:
     """
-    Utilities for training and sampling diffusion models.
+    Utilities for training and sampling the ResShift diffusion model.
+
+    This implementation is best read with the following glossary in mind:
+        x_start: clean HR training target in pixel space.
+        y: degraded observation that anchors the conditional chain.
+        z_start: encoded clean latent of x_start.
+        z_y: encoded degraded latent of y.
+        z_t / x_t: shifted noisy latent at diffusion step t.
+        eta_t: schedule value that controls drift toward the degraded anchor.
+        kappa: scalar that controls stochastic noise strength at each step.
+
+    Unlike a vanilla DDPM, the forward process does not push clean samples
+    toward an unconditional standard normal. It shifts the clean latent toward
+    the degraded anchor and only adds enough Gaussian noise to make reverse
+    denoising learnable in a very short chain.
 
     :param sqrt_etas: a 1-D numpy array of etas for each diffusion timestep,
                 starting at T and going to 1.
@@ -139,7 +153,9 @@ class GaussianDiffusion:
         self.latent_flag = latent_flag
         self.sf = sf
 
-        # Use float64 for accuracy.
+        # `eta_t` is the residual-shifting schedule. Small values keep the
+        # sample close to the clean latent; large values move it toward the
+        # degraded anchor while increasing stochasticity.
         self.sqrt_etas = sqrt_etas
         self.etas = sqrt_etas**2
         assert len(self.etas.shape) == 1, "etas must be 1-D"
@@ -149,7 +165,10 @@ class GaussianDiffusion:
         self.etas_prev = np.append(0.0, self.etas[:-1])
         self.alpha = self.etas - self.etas_prev
 
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
+        # These coefficients define q(x_{t-1} | x_t, x_0). Because the forward
+        # chain is anchored around the degraded input, the reverse posterior is
+        # expressed in terms of the current shifted latent and the recovered
+        # clean latent rather than an unconditional DDPM prior.
         self.posterior_variance = kappa**2 * self.etas_prev / self.etas * self.alpha
         self.posterior_variance_clipped = np.append(
                 self.posterior_variance[1], self.posterior_variance[1:]
@@ -160,7 +179,9 @@ class GaussianDiffusion:
         self.posterior_mean_coef1 = self.etas_prev / self.etas
         self.posterior_mean_coef2 = self.alpha / self.etas
 
-        # weight for the mse loss
+        # Optional KL-inspired weighting depends on what the denoiser predicts.
+        # The journal SR config uses START_X, so supervision is applied
+        # directly to the clean latent estimate.
         if model_mean_type in [ModelMeanType.START_X, ModelMeanType.RESIDUAL]:
             weight_loss_mse = 0.5 / self.posterior_variance_clipped * (self.alpha / self.etas)**2
         elif model_mean_type in [ModelMeanType.EPSILON, ModelMeanType.EPSILON_SCALE]  :
@@ -182,6 +203,9 @@ class GaussianDiffusion:
         :param t: the number of diffusion steps (minus 1). Here, 0 means one step.
         :return: A tuple (mean, variance, log_variance), all of x_start's shape.
         """
+        # The mean is a schedule-controlled interpolation from clean target to
+        # degraded anchor. When eta_t grows, q(x_t | x_0, y) drifts farther
+        # from x_start and closer to y.
         mean = _extract_into_tensor(self.etas, t, x_start.shape) * (y - x_start) + x_start
         variance = _extract_into_tensor(self.etas, t, x_start.shape) * self.kappa**2
         log_variance = variance.log()
@@ -199,6 +223,10 @@ class GaussianDiffusion:
         :param noise: if specified, the split-out normal noise.
         :return: A noisy version of x_start.
         """
+        # Forward diffusion in ResShift forms a path from clean target toward
+        # the degraded anchor, then perturbs that shifted point with Gaussian
+        # noise. This is why inference can start near the observation instead
+        # of from pure noise.
         if noise is None:
             noise = th.randn_like(x_start)
         assert noise.shape == x_start.shape
@@ -215,6 +243,9 @@ class GaussianDiffusion:
 
         """
         assert x_start.shape == x_t.shape
+        # During reverse denoising, x_t summarizes both the degraded anchor and
+        # injected noise, while x_start is the model's reconstructed clean
+        # latent. Their posterior combination yields the mean of x_{t-1}.
         posterior_mean = (
             _extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_t
             + _extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_start
@@ -263,6 +294,10 @@ class GaussianDiffusion:
 
         B, C = x_t.shape[:2]
         assert t.shape == (B,)
+        # The denoiser sees the current shifted latent plus conditioning
+        # (`model_kwargs`, typically the degraded image). `_scale_input`
+        # normalizes the input so different timesteps present comparable
+        # magnitudes to the network.
         model_output = model(self._scale_input(x_t, t), t, **model_kwargs)
 
         model_variance = _extract_into_tensor(self.posterior_variance, t, x_t.shape)
@@ -275,6 +310,9 @@ class GaussianDiffusion:
                 return x.clamp(-1, 1)
             return x
 
+        # The journal SR config sets `predict_type: xstart`, so the network is
+        # trained to regress the clean latent directly. Other modes reconstruct
+        # the clean latent from residual or noise parameterizations.
         if self.model_mean_type == ModelMeanType.START_X:      # predict x_0
             pred_xstart = process_xstart(model_output)
         elif self.model_mean_type == ModelMeanType.RESIDUAL:      # predict x_0
@@ -292,6 +330,8 @@ class GaussianDiffusion:
         else:
             raise ValueError(f'Unknown Mean type: {self.model_mean_type}')
 
+        # Once x_0 is reconstructed, the reverse step uses the analytical
+        # posterior to recover the mean of x_{t-1}.
         model_mean, _, _ = self.q_posterior_mean_variance(
             x_start=pred_xstart, x_t=x_t, t=t
         )
@@ -355,6 +395,8 @@ class GaussianDiffusion:
             denoised_fn=denoised_fn,
             model_kwargs=model_kwargs,
         )
+        # Stochasticity is only injected while t > 0; the final step outputs a
+        # deterministic clean estimate.
         noise = th.randn_like(x)
         if noise_repeat:
             noise = noise[0,].repeat(x.shape[0], 1, 1, 1)
@@ -439,9 +481,14 @@ class GaussianDiffusion:
         """
         if device is None:
             device = next(model.parameters()).device
+        # The degraded observation is first mapped into the same latent space
+        # as the clean target so the reverse chain can denoise around a
+        # conditional anchor rather than around zero-mean Gaussian noise.
         z_y = self.encode_first_stage(y, first_stage_model, up_sample=True)
 
-        # generating noise
+        # ResShift initializes reverse denoising from a conditional prior near
+        # z_y. Starting close to the degraded anchor is the key reason the
+        # journal model can work with only 4 reverse steps.
         if noise is None:
             noise = th.randn_like(z_y)
         if noise_repeat:
@@ -487,6 +534,8 @@ class GaussianDiffusion:
         if first_stage_model is None:
             return z_sample
         else:
+            # Diffusion runs in VQ latent space. The final restoration becomes a
+            # visible HR image only after decoding the denoised latent.
             z_sample = 1 / self.scale_factor * z_sample
             if consistencydecoder is None:
                 out = decoder(z_sample.type(model_dtype))
@@ -501,6 +550,9 @@ class GaussianDiffusion:
         data_dtype = y.dtype
         model_dtype = next(first_stage_model.parameters()).dtype
         if up_sample and self.sf != 1:
+            # For SR, the degraded observation is first upsampled to the HR
+            # grid so its latent lives on the same spatial support as the clean
+            # target latent used in the diffusion loss.
             y = F.interpolate(y, scale_factor=self.sf, mode='bicubic')
         if first_stage_model is None:
             return y
@@ -521,6 +573,8 @@ class GaussianDiffusion:
         :param y: the [N x C x ...] tensor of degraded inputs.
         :param noise: the [N x C x ...] tensor of degraded inputs.
         """
+        # The reverse chain starts from the degraded anchor plus schedule-sized
+        # Gaussian noise, not from an unconditional standard normal sample.
         if noise is None:
             noise = th.randn_like(y)
 
@@ -552,6 +606,9 @@ class GaussianDiffusion:
         if model_kwargs is None:
             model_kwargs = {}
 
+        # Both the clean HR target and the degraded observation are diffused in
+        # latent space. `z_start` is the latent the network should recover,
+        # while `z_y` is the degraded anchor that defines the conditional path.
         z_y = self.encode_first_stage(y, first_stage_model, up_sample=True)
         z_start = self.encode_first_stage(x_start, first_stage_model, up_sample=False)
 
@@ -564,6 +621,8 @@ class GaussianDiffusion:
 
         if self.loss_type == LossType.MSE or self.loss_type == LossType.WEIGHTED_MSE:
             model_output = model(self._scale_input(z_t, t), t, **model_kwargs)
+            # The regression target depends on the parameterization. The journal
+            # SR model uses START_X, so it directly predicts the clean latent.
             target = {
                 ModelMeanType.START_X: z_start,
                 ModelMeanType.RESIDUAL: z_y - z_start,
@@ -598,7 +657,8 @@ class GaussianDiffusion:
     def _scale_input(self, inputs, t):
         if self.normalize_input:
             if self.latent_flag:
-                # the variance of latent code is around 1.0
+                # Timestep-dependent normalization keeps the denoiser input
+                # statistics roughly stable as diffusion noise grows.
                 std = th.sqrt(_extract_into_tensor(self.etas, t, inputs.shape) * self.kappa**2 + 1)
                 inputs_norm = inputs / std
             else:
@@ -1236,4 +1296,3 @@ class GaussianDiffusionDDPM:
                 z_y = first_stage_model.encode(y)
                 out = z_y * self.scale_factor
                 return out.type(ori_dtype)
-

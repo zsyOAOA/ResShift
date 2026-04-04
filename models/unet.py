@@ -679,6 +679,8 @@ class UNetModelSwin(nn.Module):
         self.cond_lq = cond_lq
         self.cond_mask = cond_mask
 
+        # Every residual block receives a learned embedding of the diffusion
+        # timestep so the denoiser knows which reverse step it is solving.
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
             linear(model_channels, time_embed_dim),
@@ -690,6 +692,8 @@ class UNetModelSwin(nn.Module):
             self.feature_extractor = nn.Identity()
             base_chn = 4 if cond_mask else 3
         else:
+            # The degraded anchor is projected to the same spatial scale used by
+            # the latent denoiser before concatenation with the diffused latent.
             feature_extractor = []
             feature_chn = 4 if cond_mask else 3
             base_chn = 16
@@ -722,6 +726,9 @@ class UNetModelSwin(nn.Module):
                 ]
                 ch = int(mult * model_channels)
                 if ds in attention_resolutions and jj==0:
+                    # Swin blocks add non-local context so each denoising stage
+                    # can reason about long-range structure, not only local
+                    # convolutional evidence.
                     layers.append(
                         BasicLayer(
                                 in_chans=ch,
@@ -879,6 +886,8 @@ class UNetModelSwin(nn.Module):
                 assert self.cond_mask
                 lq = th.cat([lq, mask], dim=1)
             lq = self.feature_extractor(lq.type(self.dtype))
+            # This is the key conditional-restoration step: the degraded anchor
+            # is concatenated with the current shifted latent before denoising.
             x = th.cat([x, lq], dim=1)
 
 
@@ -888,6 +897,8 @@ class UNetModelSwin(nn.Module):
             hs.append(h)
         h = self.middle_block(h, emb)
         for module in self.output_blocks:
+            # U-Net skip connections preserve local detail while the Swin blocks
+            # contribute the long-range context needed for global structure.
             h = th.cat([h, hs.pop()], dim=1)
             h = module(h, emb)
         h = h.type(x.dtype)
@@ -1178,4 +1189,3 @@ class UNetModelConv(nn.Module):
         h = h.type(x.dtype)
         out = self.out(h)
         return out
-

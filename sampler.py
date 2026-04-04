@@ -83,7 +83,9 @@ class BaseSampler:
             print(log_str, flush=True)
 
     def build_model(self):
-        # diffusion model
+        # Inference uses a frozen denoiser plus a frozen autoencoder. The
+        # denoiser operates in latent space and the autoencoder only defines
+        # the latent/image boundary.
         log_str = f'Building the diffusion model with length: {self.configs.diffusion.params.steps}...'
         self.write_log(log_str)
         self.base_diffusion = util_common.instantiate_from_config(self.configs.diffusion)
@@ -174,6 +176,8 @@ class ResShiftSampler(BaseSampler):
 
         offset = self.padding_offset
         ori_h, ori_w = y0.shape[2:]
+        # Padding is only a compatibility step for the network's windowed
+        # architecture. It is not part of the diffusion algorithm itself.
         if not (ori_h % offset == 0 and ori_w % offset == 0):
             flag_pad = True
             pad_h = (math.ceil(ori_h / offset)) * offset - ori_h
@@ -182,6 +186,8 @@ class ResShiftSampler(BaseSampler):
         else:
             flag_pad = False
 
+        # `model_kwargs['lq']` injects the degraded observation into every
+        # reverse denoising step so the chain stays anchored to the input.
         if self.configs.model.params.cond_lq and mask is not None:
             model_kwargs={
                     'lq':y0,
@@ -192,6 +198,9 @@ class ResShiftSampler(BaseSampler):
         else:
             model_kwargs = None
 
+        # Reverse inference is: encode LQ -> sample an initial latent around
+        # the conditional prior near the degraded anchor -> iteratively denoise
+        # back toward the clean latent -> decode the final HR image.
         results = self.base_diffusion.p_sample_loop(
                 y=y0,
                 model=self.model,
@@ -229,6 +238,8 @@ class ResShiftSampler(BaseSampler):
 
             context = torch.cuda.amp.autocast if self.use_amp else nullcontext
             if im_lq_tensor.shape[2] > self.chop_size or im_lq_tensor.shape[3] > self.chop_size:
+                # Chopping only reduces memory pressure for large inputs. Each
+                # patch still runs the same conditional reverse process.
                 if mask is not None:
                     im_lq_tensor = torch.cat([im_lq_tensor, mask], dim=1)
                 im_spliter = ImageSpliterTh(
@@ -354,4 +365,3 @@ class ResShiftSampler(BaseSampler):
 
 if __name__ == '__main__':
     pass
-

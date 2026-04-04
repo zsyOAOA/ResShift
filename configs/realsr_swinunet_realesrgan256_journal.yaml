@@ -54,22 +54,34 @@ diffusion:
   target: models.script_util.create_gaussian_diffusion
   params:
     sf: 4
+    # Journal SR uses the custom residual-shifting schedule rather than a
+    # vanilla beta schedule from an unconditional DDPM.
     schedule_name: exponential
     schedule_kwargs:
+      # `power` shapes how quickly the chain moves from clean latent toward the
+      # degraded anchor across the 4 reverse steps.
       power: 0.3
     etas_end: 0.99
+    # The journal model is designed around an explicitly short 4-step chain.
     steps: 4
     min_noise_level: 0.2
+    # `kappa` scales the forward/reverse stochastic noise around the degraded
+    # anchor at each step.
     kappa: 2.0
     weighted_mse: False
+    # The denoiser directly predicts the clean latent (`xstart`) instead of a
+    # noise residual in the journal SR setup.
     predict_type: xstart
     timestep_respacing: ~
     scale_factor: 1.0
     normalize_input: True
+    # Diffusion happens in VQ latent space, not directly in pixel space.
     latent_flag: True
 
 degradation:
   sf: 4
+  # This block defines the synthetic LQ generator used to create degraded
+  # anchors for training. It is not the diffusion process itself.
   # the first degradation process
   resize_prob: [0.2, 0.7, 0.1]  # up, down, keep
   resize_range: [0.15, 1.5]

@@ -14,6 +14,10 @@ def space_timesteps(num_timesteps, sample_timesteps):
     :param section_counts: timesteps for sampling
     :return: a set of diffusion steps from the original process to use.
     """
+    # Respacing keeps a shorter chain for training/inference while preserving
+    # the interpretation of where each retained step sits in the original
+    # schedule. For the journal SR setup, `num_timesteps == sample_timesteps`
+    # (4), so this returns the full set {0, 1, 2, 3}.
     all_steps = [int((num_timesteps/sample_timesteps) * x) for x in range(sample_timesteps)]
     return set(all_steps)
 
@@ -58,6 +62,9 @@ class _WrappedModel:
         self.original_num_steps = original_num_steps
 
     def __call__(self, x, ts, **kwargs):
+        # The compact respaced chain uses local indices [0, ..., K-1], but the
+        # denoiser is still conditioned on the timestep IDs from the original
+        # schedule domain so its time embedding remains semantically aligned.
         map_tensor = th.tensor(self.timestep_map, device=ts.device, dtype=ts.dtype)
         new_ts = map_tensor[ts]
         return self.model(x, new_ts, **kwargs)
@@ -97,4 +104,3 @@ class SpacedDiffusionDDPM(GaussianDiffusionDDPM):
         if isinstance(model, _WrappedModel):
             return model
         return _WrappedModel(model, self.timestep_map, self.original_num_steps)
-

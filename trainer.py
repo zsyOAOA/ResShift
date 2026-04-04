@@ -514,6 +514,8 @@ class TrainerDifIR(TrainerBase):
         batch could not have different resize scaling factors. Therefore, we employ this training pair pool
         to increase the degradation diversity in a batch.
         """
+        # This queue improves restoration-data diversity but is not part of the
+        # diffusion formulation itself.
         # initialize
         b, c, h, w = self.lq.size()
         if not hasattr(self, 'queue_size'):
@@ -550,6 +552,10 @@ class TrainerDifIR(TrainerBase):
         if realesrgan is None:
             realesrgan = self.configs.data.get(phase, dict).type == 'realesrgan'
         if realesrgan and phase == 'train':
+            # Training does not use native low-quality pairs. It synthesizes
+            # degraded observations on the fly with a Real-ESRGAN-style
+            # corruption pipeline, and those synthetic LQ images become the
+            # degraded anchors for conditional diffusion.
             if not hasattr(self, 'jpeger'):
                 self.jpeger = DiffJPEG(differentiable=False).cuda()  # simulate JPEG compression artifacts
             if not hasattr(self, 'use_sharpener'):
@@ -571,6 +577,8 @@ class TrainerDifIR(TrainerBase):
                 im_gt = self.use_sharpener(im_gt)
 
             # ----------------------- The first degradation process ----------------------- #
+            # This stage creates coarse blur, resize, noise, and compression so
+            # the model sees realistic anchors rather than ideal bicubic inputs.
             # blur
             out = filter2D(im_gt, kernel1)
             # random resize
@@ -609,6 +617,8 @@ class TrainerDifIR(TrainerBase):
             out = self.jpeger(out, quality=jpeg_p)
 
             # ----------------------- The second degradation process ----------------------- #
+            # A second stochastic pass increases degradation diversity and
+            # better matches the compound corruptions seen in real images.
             if random.random() < self.configs.degradation['second_order_prob']:
                 # blur
                 if random.random() < self.configs.degradation['second_blur_prob']:
@@ -703,7 +713,8 @@ class TrainerDifIR(TrainerBase):
                 with open(f"records_nan_rank{self.rank}.log", 'a') as f:
                     f.write(f'Find Nan value in rank{self.rank}\n')
 
-            # training pair pool
+            # The queue broadens corruption diversity inside a batch before the
+            # diffusion loss samples random timesteps from these pairs.
             self._dequeue_and_enqueue()
             self.lq = self.lq.contiguous()  # for the warning: grad and param do not obey the gradient layout contract
 
@@ -746,6 +757,9 @@ class TrainerDifIR(TrainerBase):
         for jj in range(0, current_batchsize, micro_batchsize):
             micro_data = {key:value[jj:jj+micro_batchsize,] for key, value in data.items()}
             last_batch = (jj+micro_batchsize >= current_batchsize)
+            # Diffusion training samples timesteps uniformly so the denoiser
+            # learns every stage of the short reverse chain, not just the final
+            # refinement step.
             tt = torch.randint(
                     0, self.base_diffusion.num_timesteps,
                     size=(micro_data['gt'].shape[0],),
@@ -757,11 +771,16 @@ class TrainerDifIR(TrainerBase):
                 noise_chn = self.configs.autoencoder.params.embed_dim
             else:
                 noise_chn = micro_data['gt'].shape[1]
+            # Noise is sampled at latent resolution because the diffusion model
+            # learns to denoise VQ latents rather than pixels directly.
             noise = torch.randn(
                     size= (micro_data['gt'].shape[0], noise_chn,) + (latent_resolution, ) * 2,
                     device=micro_data['gt'].device,
                     )
             if self.configs.model.params.cond_lq:
+                # The denoiser never works unconditionally for SR: it sees the
+                # degraded anchor `lq` while predicting the clean latent target
+                # associated with the sampled timestep.
                 model_kwargs = {'lq':micro_data['lq'],}
                 if 'mask' in micro_data:
                     model_kwargs['mask'] = micro_data['mask']
@@ -907,6 +926,9 @@ class TrainerDifIR(TrainerBase):
                         [self.base_diffusion.num_timesteps, ]*im_lq.shape[0],
                         dtype=torch.int64,
                         ).cuda()
+                # Validation stores intermediate reverse-step snapshots so the
+                # progress grid shows how the sample moves from the degraded
+                # prior toward the final SR reconstruction.
                 for sample in self.base_diffusion.p_sample_loop_progressive(
                         y=im_lq,
                         model=self.ema_model if self.configs.train.use_ema_val else self.model,
@@ -975,7 +997,10 @@ class TrainerDifIRLPIPS(TrainerDifIR):
     def backward_step(self, dif_loss_wrapper, micro_data, num_grad_accumulate, tt):
         loss_coef = self.configs.train.get('loss_coef')
         context = torch.cuda.amp.autocast if self.configs.train.use_amp else nullcontext
-        # diffusion loss
+        # The journal objective combines diffusion-space reconstruction with a
+        # perceptual LPIPS term after decoding. This keeps the latent estimate
+        # faithful to the reverse process while also rewarding perceptual HR
+        # quality in pixel space.
         with context():
             losses, z_t, z0_pred = dif_loss_wrapper()
             x0_pred = self.base_diffusion.decode_first_stage(
@@ -1110,4 +1135,3 @@ if __name__ == '__main__':
     xx = vutils.make_grid(torch.from_numpy(im_grid), nrow=5, normalize=True, scale_each=True).numpy()
     util_image.imshow(np.concatenate((im1, im2), 0))
     util_image.imshow(xx.transpose((1,2,0)))
-
