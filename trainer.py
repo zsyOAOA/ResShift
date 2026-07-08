@@ -984,10 +984,30 @@ class TrainerDifIRLPIPS(TrainerDifIR):
                     ) # f16
             self.current_x0_pred = x0_pred.detach()
 
+            # Roundtrip-consistent GT reference: decode(encode(gt)) rather than raw gt.
+            # The latent-space MSE (loss_coef[0] > 0) optimizes z0_pred toward
+            # encode(gt), whose decoded form is decode(encode(gt)). Referencing the
+            # raw pixels gt for the LPIPS / pixel-MSE terms therefore pulls toward a
+            # different target, because a frozen autoencoder's roundtrip is not the
+            # identity (systematic tint). The model reconciles the two minima by
+            # learning a global anti-tint, producing color drift in the output.
+            # Encoding here matches training_losses' z_start exactly (same gt,
+            # up_sample=False), so all loss terms share one target.
+            with torch.no_grad():
+                z_gt = self.base_diffusion.encode_first_stage(
+                        micro_data['gt'],
+                        self.autoencoder,
+                        up_sample=False,
+                        )
+                gt_ref = self.base_diffusion.decode_first_stage(
+                        z_gt,
+                        self.autoencoder,
+                        )
+
             # lpips loss
             losses["lpips"] = self.lpips_loss(
                     x0_pred,
-                    micro_data['gt'],
+                    gt_ref,
                     ).to(z0_pred.dtype).view(-1)
             flag_nan = torch.any(torch.isnan(losses["lpips"]))
             if flag_nan:
@@ -998,7 +1018,7 @@ class TrainerDifIRLPIPS(TrainerDifIR):
                 losses["mse"] *= loss_coef[0]
             else:                   # calculate mse in pixel space
                 assert loss_coef[2] > 0
-                losses["mse"] = mean_flat((x0_pred - micro_data['gt']) ** 2)
+                losses["mse"] = mean_flat((x0_pred - gt_ref) ** 2)
                 losses["mse"] *= loss_coef[2]
 
             assert losses["mse"].shape == losses["lpips"].shape
